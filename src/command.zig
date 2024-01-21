@@ -1,121 +1,223 @@
 const std = @import("std");
 
-// const ParseError = error{
-//     InvalidCommandCode,
-//     UnsupportedCommand,
-// };
+const ecl_start = 0x6af6;
 
-pub fn readCommandBinary(reader: anytype) !Command {
-    const code = try reader.readByte();
+const CommandBlock = struct {
+    start_addr: u16,
+    end_addr: u16,
+    commands: []Command,
+};
 
-    const tag: CommandTag = blk: {
-        if (code >= Command.tag_count) return error.InvalidCommandCode;
-        break :blk @enumFromInt(code);
+pub fn parseCommandsRecursively(allocator: std.mem.Allocator, genesis_mem: []const u8) ![]CommandBlock {
+    var command_blocks = std.ArrayList(CommandBlock).init(allocator);
+    defer command_blocks.deinit();
+
+    const header = parseEclHeader(genesis_mem);
+
+    var branchQueue = std.ArrayList(u16).init(allocator);
+    defer branchQueue.deinit();
+
+    try branchQueue.append(header.first_command_addr);
+
+    var tempCommandList = std.ArrayList(Command).init(allocator);
+    defer tempCommandList.deinit();
+
+    while (branchQueue.popOrNull()) |block_start_addr| {
+        std.debug.print("parsing block at {x}\n", .{block_start_addr});
+        tempCommandList.clearRetainingCapacity();
+
+        var cur_addr = block_start_addr;
+        block_loop: while (true) {
+            const parse_result = try parseCommand(allocator, genesis_mem[cur_addr..]);
+            try tempCommandList.append(parse_result.command);
+            try queueCommandBranches(&branchQueue, parse_result.command);
+
+            switch (getCommandFlowType(parse_result.command.tag)) {
+                .fallthrough => {
+                    cur_addr += parse_result.len;
+                },
+                .conditional => {
+                    const conditional_command_addr = cur_addr + parse_result.len;
+                    const inner_parse_result = try parseCommand(allocator, genesis_mem[conditional_command_addr..]);
+                    try tempCommandList.append(inner_parse_result.command);
+                    try queueCommandBranches(&branchQueue, inner_parse_result.command);
+                    cur_addr = conditional_command_addr + inner_parse_result.len;
+                },
+                .terminal => {
+                    cur_addr += parse_result.len;
+                    break :block_loop;
+                },
+            }
+        }
+
+        try command_blocks.append(.{
+            .start_addr = block_start_addr,
+            .end_addr = cur_addr,
+            .commands = try allocator.dupe(Command, tempCommandList.items),
+        });
+    }
+
+    return try command_blocks.toOwnedSlice();
+}
+
+fn queueCommandBranches(branch_queue: *std.ArrayList(u16), command: Command) !void {
+    switch (command.tag) {
+        .ONGOTO, .ONGOSUB => {
+            for (command.args[2..]) |arg| {
+                const addr = try getAddress(arg);
+                try branch_queue.append(addr);
+                std.debug.print("queued {x}\n", .{addr});
+            }
+        },
+        .GOTO, .GOSUB => {
+            const addr = try getAddress(command.args[0]);
+            try branch_queue.append(addr);
+            std.debug.print("queued {x}\n", .{addr});
+        },
+        else => {},
+    }
+}
+
+const ParseResult = struct {
+    command: Command,
+    len: u16,
+};
+
+fn parseCommand(allocator: std.mem.Allocator, bytes: []const u8) !ParseResult {
+    var fbs = std.io.fixedBufferStream(bytes);
+    const r = fbs.reader();
+
+    const command_code = try r.readByte();
+    const tag: CommandTag = if (command_code < CommandTag.count) @enumFromInt(command_code) else return error.InvalidCommandCode;
+
+    var command = Command{
+        .tag = tag,
+        .args = undefined,
     };
 
-    std.debug.print("{}\n", .{tag});
+    switch (tag) {
+        .ONGOTO, .ONGOSUB => {
+            const branch_to_take = try parseArg(r);
+            const num_branches = try parseArg(r);
+            const arg_count = 2 + num_branches.immediate;
+            command.args = try allocator.alloc(Arg, arg_count);
+            command.args[0] = branch_to_take;
+            command.args[1] = num_branches;
+            for (command.args[2..]) |*arg| {
+                arg.* = try parseArg(r);
+            }
+        },
+        else => {
+            const arg_count = getCommandArgCount(tag);
+            command.args = try allocator.alloc(Arg, arg_count);
+            for (command.args) |*arg| {
+                arg.* = try parseArg(r);
+            }
+        },
+    }
 
-    return switch (tag) {
-        .EXIT => Command.EXIT,
-        .ADD => .{ .ADD = [3]Arg{
-            try readArgBinary(reader),
-            try readArgBinary(reader),
-            try readArgBinary(reader),
-        } },
-        .SAVE => .{ .SAVE = [2]Arg{
-            try readArgBinary(reader),
-            try readArgBinary(reader),
-        } },
-        .SOUND => .{ .SOUND = try readArgBinary(reader) },
-        .LOADFILES => .{ .LOADFILES = try readArgBinary(reader) },
-        .AND => .{ .AND = [3]Arg{
-            try readArgBinary(reader),
-            try readArgBinary(reader),
-            try readArgBinary(reader),
-        } },
-        else => error.UnsupportedCommand,
+    return ParseResult{
+        .command = command,
+        .len = @intCast(fbs.pos),
     };
 }
 
-const ArgParseError = error{
-    WrongArgType,
+const EclHeader = struct {
+    a: u16,
+    b: u16,
+    c: u16,
+    d: u16,
+    first_command_addr: u16,
 };
 
-const ArgType = enum {
-    scalar_1,
-    scalar_2,
-    scalar_4,
-    indirect_scalar_1,
-    indirect_scalar_2,
-    indirect_scalar_4,
+fn parseEclHeader(genesis_mem: []const u8) EclHeader {
+    return .{
+        .a = std.mem.readIntLittle(u16, genesis_mem[ecl_start + 2 .. ecl_start + 4]),
+        .b = std.mem.readIntLittle(u16, genesis_mem[ecl_start + 6 .. ecl_start + 8]),
+        .c = std.mem.readIntLittle(u16, genesis_mem[ecl_start + 10 .. ecl_start + 12]),
+        .d = std.mem.readIntLittle(u16, genesis_mem[ecl_start + 14 .. ecl_start + 16]),
+        .first_command_addr = std.mem.readIntLittle(u16, genesis_mem[ecl_start + 18 .. ecl_start + 20]),
+    };
+}
+
+const ArgEncoding = enum {
+    immediate1,
+    immediate2,
+    immediate4,
+    indirect1,
+    indirect2,
+    indirect4,
     level_text_offset,
     mem_address,
 };
 
-const Arg = union(ArgType) {
-    scalar_1: u8,
-    scalar_2: u16,
-    scalar_4: u32,
-    indirect_scalar_1: u16,
-    indirect_scalar_2: u16,
-    indirect_scalar_4: u16,
+const Arg = union(enum) {
+    immediate: u32,
+    indirect1: u16,
+    indirect2: u16,
+    indirect4: u16,
     level_text_offset: u16,
     mem_address: u16,
 };
 
-fn readArgBinary(reader: anytype) !Arg {
+fn parseArg(reader: anytype) !Arg {
     const meta_byte = try reader.readByteSigned();
 
     const arg_type = parseArgMetaByte(meta_byte);
 
     return switch (arg_type) {
-        .scalar_1 => .{ .scalar_1 = try reader.readByte() },
-        .scalar_2 => .{ .scalar_2 = try reader.readIntLittle(u16) },
-        .scalar_4 => .{ .scalar_4 = try reader.readIntLittle(u32) },
-        .indirect_scalar_1 => .{ .indirect_scalar_1 = try reader.readIntLittle(u16) },
-        .indirect_scalar_2 => .{ .indirect_scalar_2 = try reader.readIntLittle(u16) },
-        .indirect_scalar_4 => .{ .indirect_scalar_4 = try reader.readIntLittle(u16) },
+        .immediate1 => .{ .immediate = try reader.readByte() },
+        .immediate2 => .{ .immediate = try reader.readIntLittle(u16) },
+        .immediate4 => .{ .immediate = try reader.readIntLittle(u32) },
+        .indirect1 => .{ .indirect1 = try reader.readIntLittle(u16) },
+        .indirect2 => .{ .indirect2 = try reader.readIntLittle(u16) },
+        .indirect4 => .{ .indirect4 = try reader.readIntLittle(u16) },
         .level_text_offset => .{ .level_text_offset = try reader.readIntLittle(u16) },
         .mem_address => .{ .mem_address = try reader.readIntLittle(u16) },
     };
 }
 
-fn parseArgMetaByte(meta_byte: i8) ArgType {
+fn getAddress(arg: Arg) !u16 {
+    return switch (arg) {
+        .indirect1, .indirect2, .indirect4, .level_text_offset, .mem_address => |addr| addr,
+        else => error.WrongArgType,
+    };
+}
+
+fn parseArgMetaByte(meta_byte: i8) ArgEncoding {
     const even = @mod(meta_byte, 2) == 0;
 
-    if (meta_byte == 0) return .scalar_1;
+    if (meta_byte == 0) return .immediate1;
 
-    if (meta_byte == 4) return .scalar_4;
+    if (meta_byte == 4) return .immediate4;
 
-    if (meta_byte > 0 and even) return .scalar_2;
+    if (meta_byte > 0 and even) return .immediate2;
 
     if (meta_byte == 0x80) return .level_text_address;
 
     if (meta_byte < 0) return .mem_address;
 
-    if (meta_byte == 1) return .indirect_scalar_1;
+    if (meta_byte == 1) return .indirect1;
 
-    if (meta_byte == 3) return .indirect_scalar_2;
+    if (meta_byte == 3) return .indirect2;
 
-    return .indirect_scalar_4;
+    return .indirect4;
     // TODO see if these relaxed requirements can be more specific
     // i.e. instead of "any even positive" maybe it happens to always be 2 in practice
 
 }
 
-const CommandTag = std.meta.Tag(Command);
-
-pub const Command = union(enum(u8)) {
+const CommandTag = enum {
     EXIT,
     GOTO,
     GOSUB,
     COMPARE,
-    ADD: [3]Arg,
-    SUBTRACT: [3]Arg,
-    DIVIDE: [3]Arg,
-    MULTIPLY: [3]Arg,
+    ADD,
+    SUBTRACT,
+    DIVIDE,
+    MULTIPLY,
     RANDOM,
-    SAVE: [2]Arg,
+    SAVE,
     LOADCHARACTER,
     LOADMONSTER,
     SETUPMONSTERS,
@@ -139,7 +241,7 @@ pub const Command = union(enum(u8)) {
     CHECKPARTY,
     SPACECOMBAT,
     NEWECL,
-    LOADFILES: Arg,
+    LOADFILES,
     SKILL,
     PRINTSKILL,
     COMBAT,
@@ -153,15 +255,15 @@ pub const Command = union(enum(u8)) {
     GETYN,
     DRAWINDOW,
     DAMAGE,
-    AND: [3]Arg,
+    AND,
     OR,
     WHMENU,
     FINDITEM,
     PRINTRETURN,
     CLOCK,
     SAVETABLE,
-    ADDNPC, // 2
-    LOADPIECES, // 1
+    ADDNPC,
+    LOADPIECES,
     PROGRAM,
     WHO,
     DELAY,
@@ -173,7 +275,7 @@ pub const Command = union(enum(u8)) {
     DESTROY,
     ADDEP,
     ENCEXIT,
-    SOUND: Arg,
+    SOUND,
     SAVECHARACTER,
     HOWFAR,
     FOR,
@@ -201,17 +303,129 @@ pub const Command = union(enum(u8)) {
     NEWREGION,
     ICONMENU,
 
-    const tag_count = @typeInfo(@This()).Union.fields.len;
+    const count = @typeInfo(@This()).Enum.fields.len;
+};
+
+pub const Command = struct {
+    tag: CommandTag,
+    args: []Arg,
 };
 
 const BinOp = struct {
-    lhs: Scalar,
-    rhs: Scalar,
-    dest: Address,
+    lhs: Arg,
+    rhs: Arg,
+    dest: Arg,
 };
 
-const Scalar = u32;
-const Address = union(enum) {
-    memory: u16,
-    text: u16,
+const FlowType = enum {
+    fallthrough,
+    conditional,
+    terminal,
 };
+
+// TODO: what is ENCEXIT's flow type?
+fn getCommandFlowType(command: CommandTag) FlowType {
+    return switch (command) {
+        .EXIT, .GOTO, .RETURN, .ONGOTO => .terminal,
+        .IFEQ, .IFNE, .IFLT, .IFGT, .IFLE, .IFGE => .conditional,
+        else => .fallthrough,
+    };
+}
+fn getCommandArgCount(command: CommandTag) u8 {
+    return switch (command) {
+        .EXIT => 0x00,
+        .GOTO => 0x01,
+        .GOSUB => 0x01,
+        .COMPARE => 0x02,
+        .ADD => 0x03,
+        .SUBTRACT => 0x03,
+        .DIVIDE => 0x03,
+        .MULTIPLY => 0x03,
+        .RANDOM => 0x02,
+        .SAVE => 0x02,
+        .LOADCHARACTER => 0x01,
+        .LOADMONSTER => 0x03,
+        .SETUPMONSTERS => 0x04,
+        .APPROACH => 0x00,
+        .PICTURE => 0x01,
+        .INPUTNUMBER => 0x02,
+        .INPUTSTRING => 0x02,
+        .PRINT => 0x01,
+        .PRINTCLEAR => 0x01,
+        .RETURN => 0x00,
+        .COMPAREAND => 0x04,
+        .MENU => 0x00,
+        .IFEQ => 0x00,
+        .IFNE => 0x00,
+        .IFLT => 0x00,
+        .IFGT => 0x00,
+        .IFLE => 0x00,
+        .IFGE => 0x00,
+        .CLEARMONSTERS => 0x00,
+        .SETTIMER => 0x02,
+        .CHECKPARTY => 0x06,
+        .SPACECOMBAT => 0x02,
+        .NEWECL => 0x01,
+        .LOADFILES => 0x03,
+        .SKILL => 0x03,
+        .PRINTSKILL => 0x03,
+        .COMBAT => 0x00,
+        .ONGOTO => 0x02, // NOTE: I changed this from 0 to 2
+        .ONGOSUB => 0x02,
+        .TREASURE => 0x00,
+        .ROB => 0x03,
+        .CONTINUE => 0x00,
+        .GETABLE => 0x03,
+        .HMENU => 0x00,
+        .GETYN => 0x00,
+        .DRAWINDOW => 0x00,
+        .DAMAGE => 0x05,
+        .AND => 0x03,
+        .OR => 0x03,
+        .WHMENU => 0x00,
+        .FINDITEM => 0x01,
+        .PRINTRETURN => 0x00,
+        .CLOCK => 0x01,
+        .SAVETABLE => 0x03,
+        .ADDNPC => 0x01,
+        .LOADPIECES => 0x01,
+        .PROGRAM => 0x01,
+        .WHO => 0x01,
+        .DELAY => 0x00,
+        .SPELLS => 0x03,
+        .PROTECT => 0x01,
+        .CLEARBOX => 0x00,
+        .DUMP => 0x00,
+        .JOURNAL => 0x02,
+        .DESTROY => 0x02,
+        .ADDEP => 0x02,
+        .ENCEXIT => 0x00,
+        .SOUND => 0x01,
+        .SAVECHARACTER => 0x00,
+        .HOWFAR => 0x02,
+        .FOR => 0x02,
+        .ENDFOR => 0x00,
+        .HIDEITEMS => 0x01,
+        .SKILLDAMAGE => 0x06,
+        .DUEL => 0x00,
+        .STORE => 0x01,
+        .VIEW => 0x02,
+        .ANIMATE => 0x00,
+        .STAIRCASE => 0x00,
+        .HALFSTEP => 0x00,
+        .STEPFORWARD => 0x00,
+        .PALETTE => 0x01,
+        .UNLOCKDOOR => 0x00,
+        .ADDFIGURE => 0x04,
+        .ADDCORPSE => 0x03,
+        .ADDFIGURE2 => 0x04,
+        .ADDCORPSE2 => 0x03,
+        .UPDATEFRAME => 0x01,
+        .REMOVEFIGURE => 0x00,
+        .EXPLOSION => 0x01,
+        .STEPBACK => 0x00,
+        .HALFBACK => 0x00,
+        .NEWREGION => 0x00,
+        .ICONMENU => 0x00,
+    };
+}

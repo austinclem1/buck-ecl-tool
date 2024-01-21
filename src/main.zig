@@ -1,16 +1,14 @@
 const std = @import("std");
 
-const command = @import("command3.zig");
+const command = @import("command.zig");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
-//6bac
 
 const ecl_offset = 0x6af6;
 const level_text_offset = 0x731c;
 const memdump_path = "memdump";
 
 pub fn main() !void {
-    command.printCommandNamesAndArgCount();
     var gpa = GPA{};
     defer _ = gpa.deinit();
     var allocator = gpa.allocator();
@@ -18,44 +16,23 @@ pub fn main() !void {
     const file = try std.fs.cwd().openFile(memdump_path, .{});
     defer file.close();
 
-    const genesis_ram = try file.reader().readAllAlloc(allocator, 64 * 1024);
-    defer allocator.free(genesis_ram);
+    const genesis_mem = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(genesis_mem);
 
-    // var buf_reader = std.io.bufferedReader(file.reader());
-    // const reader = buf_reader.reader();
-    var fbs = std.io.fixedBufferStream(genesis_ram);
-    const reader = fbs.reader();
-
-    try fbs.seekTo(ecl_offset);
-    const header = try parseEclHeader(reader);
-
-    std.debug.print("{any}\n", .{header});
-
-    try fbs.seekTo(header.first_command_offset);
-    // try fbs.seekTo(header.b);
-    // try fbs.seekTo(0x6ce3);
-
-    // while (fbs.pos < header.c) {
-    while (true) {
-        const c = try command.readCommandBinary(reader);
-        std.debug.print("{x} {}\n", .{ fbs.pos, c });
-
-        // if (c == .EXIT) break;
+    const command_blocks = try command.parseCommandsRecursively(allocator, genesis_mem);
+    for (command_blocks) |block| {
+        std.debug.print("{x} - {x}\n", .{ block.start_addr, block.end_addr });
+        for (block.commands) |cmd| {
+            std.debug.print("{any}\n", .{cmd});
+        }
     }
-
-    // // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    // std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    //
-    // // stdout is for the actual output of your application, for example if you
-    // // are implementing gzip, then only the compressed bytes should be sent to
-    // // stdout, not any debugging messages.
-    // const stdout_file = std.io.getStdOut().writer();
-    // var bw = std.io.bufferedWriter(stdout_file);
-    // const stdout = bw.writer();
-    //
-    // try stdout.print("Run `zig build test` to run the tests.\n", .{});
-    //
-    // try bw.flush(); // don't forget to flush!
+    for (command_blocks) |block| {
+        for (block.commands) |cmd| {
+            allocator.free(cmd.args);
+        }
+        allocator.free(block.commands);
+    }
+    allocator.free(command_blocks);
 }
 
 const EclHeader = struct {
