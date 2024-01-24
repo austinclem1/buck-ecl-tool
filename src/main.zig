@@ -25,6 +25,14 @@ pub fn main() !void {
     const ecl_header = parser.parseEclHeader();
 
     try parser.parseCommandsRecursively(ecl_header.first_command_address);
+    try parser.parseCommandsRecursively(0x6c13);
+
+    {
+        var it = parser.vars.iterator();
+        while (it.next()) |e| {
+            std.debug.print("{s} {x}\n", .{ @tagName(e.value_ptr.*), e.key_ptr.* });
+        }
+    }
 
     for (parser.blocks.items) |block| {
         std.debug.print("\nBLOCK {x} - {x}\n", .{ block.start_addr, block.end_addr });

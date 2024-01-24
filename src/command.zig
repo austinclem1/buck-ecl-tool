@@ -7,8 +7,18 @@ pub const CommandParser = struct {
     blocks: std.ArrayList(CommandBlock),
     commands: std.ArrayList(Command),
     args: std.ArrayList(Arg),
+    vars: ArgMap,
+    visited_branches: AddressSet,
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
+    const ArgMap = std.AutoHashMap(u16, VarType);
+    const AddressSet = std.AutoHashMap(u16, void);
+
+    const VarType = enum {
+        byte,
+        word,
+        dword,
+    };
 
     const header_address = 0x6af6;
 
@@ -17,6 +27,8 @@ pub const CommandParser = struct {
         const blocks = std.ArrayList(CommandBlock).init(allocator);
         const commands = std.ArrayList(Command).init(allocator);
         const args = std.ArrayList(Arg).init(allocator);
+        const vars = ArgMap.init(allocator);
+        const visited_branches = AddressSet.init(allocator);
 
         return .{
             .allocator = allocator,
@@ -25,6 +37,8 @@ pub const CommandParser = struct {
             .blocks = blocks,
             .commands = commands,
             .args = args,
+            .vars = vars,
+            .visited_branches = visited_branches,
         };
     }
 
@@ -33,6 +47,8 @@ pub const CommandParser = struct {
         self.blocks.deinit();
         self.commands.deinit();
         self.args.deinit();
+        self.vars.deinit();
+        self.visited_branches.deinit();
     }
 
     const CommandBlock = struct {
@@ -70,6 +86,7 @@ pub const CommandParser = struct {
 
                 try self.commands.append(cmd);
                 try self.queueCommandBranches(cmd);
+                try self.trackUsedVars(cmd);
 
                 const next_addr = cur_addr + parse_result.len;
 
@@ -82,6 +99,7 @@ pub const CommandParser = struct {
                         const conditional_cmd = conditional_result.command;
                         try self.commands.append(conditional_cmd);
                         try self.queueCommandBranches(conditional_cmd);
+                        try self.trackUsedVars(conditional_cmd);
                         cur_addr = next_addr + conditional_result.len;
                     },
                     .terminal => {
@@ -102,6 +120,23 @@ pub const CommandParser = struct {
     // fn parseBlock(self: *CommandParser, start_address: u16) !void {
     //
     // }
+    fn trackUsedVars(self: *CommandParser, command: Command) !void {
+        const args = self.getCommandArgs(command);
+
+        for (args) |arg| {
+            const var_type = switch (arg) {
+                .indirect1 => VarType.byte,
+                .indirect2 => VarType.word,
+                .indirect4 => VarType.dword,
+                else => continue,
+            };
+            const addr = try arg.getAddress();
+            const maybe_existing = try self.vars.fetchPut(addr, var_type);
+            if (maybe_existing) |entry| {
+                std.debug.assert(entry.value == var_type);
+            }
+        }
+    }
 
     fn queueCommandBranches(self: *CommandParser, command: Command) !void {
         const command_args = self.getCommandArgs(command);
@@ -110,12 +145,16 @@ pub const CommandParser = struct {
             .ONGOTO, .ONGOSUB => {
                 for (command_args[2..]) |arg| {
                     const addr = try arg.getAddress();
+                    if (self.visited_branches.contains(addr)) continue;
+                    try self.visited_branches.putNoClobber(addr, {});
                     try self.branch_queue.writeItem(addr);
                     std.debug.print("queued {x}\n", .{addr});
                 }
             },
             .GOTO, .GOSUB => {
                 const addr = try command_args[0].getAddress();
+                if (self.visited_branches.contains(addr)) return;
+                try self.visited_branches.putNoClobber(addr, {});
                 try self.branch_queue.writeItem(addr);
                 std.debug.print("queued {x}\n", .{addr});
             },
