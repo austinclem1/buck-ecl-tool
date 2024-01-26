@@ -11,16 +11,28 @@ pub const CommandParser = struct {
     visited_branches: AddressSet,
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
-    const ArgMap = std.AutoHashMap(u16, VarType);
+    const ArgMap = std.AutoArrayHashMap(u16, VarType);
     const AddressSet = std.AutoHashMap(u16, void);
 
-    const VarType = enum {
+    pub const VarType = enum {
         byte,
         word,
         dword,
     };
 
     const header_address = 0x6af6;
+
+    pub fn sortVarsByAddress(self: *CommandParser) void {
+        const C = struct {
+            keys: []u16,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.keys[a_index] < ctx.keys[b_index];
+            }
+        };
+
+        self.vars.sort(C{ .keys = self.vars.keys() });
+    }
 
     pub fn init(allocator: std.mem.Allocator, genesis_memory: []const u8) CommandParser {
         const branch_queue = BranchQueue.init(allocator);
@@ -56,6 +68,11 @@ pub const CommandParser = struct {
         end_addr: u16,
         commands_index: u16,
         commands_count: u16,
+
+        pub fn lessThan(context: void, a: CommandBlock, b: CommandBlock) bool {
+            _ = context;
+            return a.start_addr < b.start_addr;
+        }
     };
 
     pub fn getBlockCommands(self: *const CommandParser, block: CommandBlock) []Command {
@@ -73,43 +90,73 @@ pub const CommandParser = struct {
     pub fn parseCommandsRecursively(self: *CommandParser, start_address: u16) !void {
         try self.branch_queue.writeItem(start_address);
 
-        // TODO: use a set to track which branches have already been parsed in case they come up multiple times
         while (self.branch_queue.readItem()) |block_start_addr| {
+            const surrounding_blocks = self.getBlocksSurroundingAddress(block_start_addr);
+            if (surrounding_blocks.left) |left_block| {
+                if (block_start_addr < left_block.end_addr) {
+                    std.debug.print("skipping parsing block at {x}, already included in block {x} - {x}\n", .{ block_start_addr, left_block.start_addr, left_block.end_addr });
+                    continue; // already parsed these commands
+                }
+            }
+
             std.debug.print("parsing block at {x}\n", .{block_start_addr});
 
             const first_command_index = self.commands.items.len;
 
             var cur_addr = block_start_addr;
             block_loop: while (true) {
-                const parse_result = try self.parseCommand(cur_addr);
+                if (surrounding_blocks.right) |right_block| {
+                    if (cur_addr == right_block.start_addr) {
+                        std.debug.print("while parsing block at {x} ran into existing block {x} - {x}\n", .{ block_start_addr, right_block.start_addr, right_block.end_addr });
+                        // we've run into an existing block and must update it with any preceding commands
+
+                        try self.commands.ensureUnusedCapacity(right_block.commands_count);
+                        const start = right_block.commands_index;
+                        const stop = start + right_block.commands_count;
+                        const existing_commands = self.commands.items[start..stop];
+                        self.commands.appendSliceAssumeCapacity(existing_commands);
+
+                        right_block.start_addr = block_start_addr;
+                        right_block.commands_index = @intCast(first_command_index);
+                        right_block.commands_count = @intCast(self.commands.items[first_command_index..].len);
+                        break :block_loop;
+                    }
+                }
+
+                var parse_result: ParseResult = undefined;
+
+                parse_result = try self.parseCommand(cur_addr);
                 const cmd = parse_result.command;
+                const cmd_end = parse_result.end_address;
 
                 try self.commands.append(cmd);
                 try self.queueCommandBranches(cmd);
                 try self.trackUsedVars(cmd);
 
-                const next_addr = cur_addr + parse_result.len;
-
                 switch (cmd.tag.getFlowType()) {
                     .fallthrough => {
-                        cur_addr = next_addr;
+                        cur_addr = cmd_end;
                     },
                     .conditional => {
-                        const conditional_result = try self.parseCommand(next_addr);
-                        const conditional_cmd = conditional_result.command;
+                        parse_result = try self.parseCommand(cmd_end);
+                        const conditional_cmd = parse_result.command;
+                        const conditional_cmd_end = parse_result.end_address;
+
                         try self.commands.append(conditional_cmd);
                         try self.queueCommandBranches(conditional_cmd);
                         try self.trackUsedVars(conditional_cmd);
-                        cur_addr = next_addr + conditional_result.len;
+
+                        cur_addr = conditional_cmd_end;
                     },
                     .terminal => {
                         const new_block = CommandBlock{
                             .start_addr = block_start_addr,
-                            .end_addr = next_addr,
+                            .end_addr = cmd_end,
                             .commands_index = @intCast(first_command_index),
                             .commands_count = @intCast(self.commands.items[first_command_index..].len),
                         };
                         try self.blocks.append(new_block);
+                        std.sort.insertion(CommandBlock, self.blocks.items, {}, CommandBlock.lessThan);
                         break :block_loop;
                     },
                 }
@@ -117,9 +164,25 @@ pub const CommandParser = struct {
         }
     }
 
-    // fn parseBlock(self: *CommandParser, start_address: u16) !void {
-    //
-    // }
+    fn getBlocksSurroundingAddress(self: *const CommandParser, address: u16) struct {
+        left: ?*CommandBlock,
+        right: ?*CommandBlock,
+    } {
+        var left_index: ?usize = null;
+        for (self.blocks.items, 0..) |block, i| {
+            if (block.start_addr > address) break;
+            left_index = i;
+        }
+
+        var right_index: ?usize = if (left_index) |li| li + 1 else 0;
+        if (right_index.? >= self.blocks.items.len) right_index = null;
+
+        return .{
+            .left = if (left_index) |li| &self.blocks.items[li] else null,
+            .right = if (right_index) |ri| &self.blocks.items[ri] else null,
+        };
+    }
+
     fn trackUsedVars(self: *CommandParser, command: Command) !void {
         const args = self.getCommandArgs(command);
 
@@ -164,11 +227,12 @@ pub const CommandParser = struct {
 
     const ParseResult = struct {
         command: Command,
-        len: u16,
+        end_address: u16,
     };
 
     fn parseCommand(self: *CommandParser, address: u16) !ParseResult {
-        var fbs = std.io.fixedBufferStream(self.genesis_memory[address..]);
+        var fbs = std.io.fixedBufferStream(self.genesis_memory);
+        try fbs.seekTo(address);
 
         const r = fbs.reader();
 
@@ -206,7 +270,7 @@ pub const CommandParser = struct {
                 .args_index = @intCast(first_arg_index),
                 .args_count = @intCast(self.args.items[first_arg_index..].len),
             },
-            .len = @intCast(fbs.pos),
+            .end_address = @intCast(fbs.pos),
         };
     }
 
@@ -283,7 +347,7 @@ const Arg = union(enum) {
 
             if (meta_byte > 0 and even) return .immediate2;
 
-            if (meta_byte == 0x80) return .level_text_address;
+            if (meta_byte == -0x80) return .level_text_offset;
 
             if (meta_byte < 0) return .mem_address;
 

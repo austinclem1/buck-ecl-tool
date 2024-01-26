@@ -27,13 +27,16 @@ pub fn main() !void {
     try parser.parseCommandsRecursively(ecl_header.first_command_address);
     try parser.parseCommandsRecursively(0x6c13);
 
-    {
-        var it = parser.vars.iterator();
-        while (it.next()) |e| {
-            std.debug.print("{s} {x}\n", .{ @tagName(e.value_ptr.*), e.key_ptr.* });
-        }
+    parser.sortVarsByAddress();
+    var it = parser.vars.iterator();
+    while (it.next()) |e| {
+        std.debug.print("{s} {x}\n", .{ @tagName(e.value_ptr.*), e.key_ptr.* });
     }
 
+    std.debug.print("\nblocks:\n", .{});
+    for (parser.blocks.items) |block| {
+        std.debug.print("BLOCK {x} - {x}\n", .{ block.start_addr, block.end_addr });
+    }
     for (parser.blocks.items) |block| {
         std.debug.print("\nBLOCK {x} - {x}\n", .{ block.start_addr, block.end_addr });
         for (parser.getBlockCommands(block)) |command| {
