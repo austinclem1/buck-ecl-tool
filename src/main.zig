@@ -24,8 +24,11 @@ pub fn main() !void {
 
     const ecl_header = parser.parseEclHeader();
 
+    try parser.parseCommandsRecursively(ecl_header.a);
+    try parser.parseCommandsRecursively(ecl_header.b);
+    try parser.parseCommandsRecursively(ecl_header.c);
+    try parser.parseCommandsRecursively(ecl_header.d);
     try parser.parseCommandsRecursively(ecl_header.first_command_address);
-    try parser.parseCommandsRecursively(0x6c13);
 
     parser.sortVarsByAddress();
     var it = parser.vars.iterator();

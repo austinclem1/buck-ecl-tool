@@ -1,5 +1,14 @@
 const std = @import("std");
 
+const IndexSlice = struct {
+    start: u16,
+    stop: u16,
+
+    fn getLen(s: IndexSlice) u16 {
+        return s.stop - s.start;
+    }
+};
+
 pub const CommandParser = struct {
     allocator: std.mem.Allocator,
     genesis_memory: []const u8,
@@ -66,8 +75,7 @@ pub const CommandParser = struct {
     const CommandBlock = struct {
         start_addr: u16,
         end_addr: u16,
-        commands_index: u16,
-        commands_count: u16,
+        commands: IndexSlice,
 
         pub fn lessThan(context: void, a: CommandBlock, b: CommandBlock) bool {
             _ = context;
@@ -76,15 +84,11 @@ pub const CommandParser = struct {
     };
 
     pub fn getBlockCommands(self: *const CommandParser, block: CommandBlock) []Command {
-        const start = block.commands_index;
-        const end = start + block.commands_count;
-        return self.commands.items[start..end];
+        return self.commands.items[block.commands.start..block.commands.stop];
     }
 
-    pub fn getCommandArgs(self: *const CommandParser, command: Command) []Arg {
-        const start = command.args_index;
-        const end = start + command.args_count;
-        return self.args.items[start..end];
+    pub fn getCommandArgs(self: *const CommandParser, cmd: Command) []Arg {
+        return self.args.items[cmd.args.start..cmd.args.stop];
     }
 
     pub fn parseCommandsRecursively(self: *CommandParser, start_address: u16) !void {
@@ -110,15 +114,13 @@ pub const CommandParser = struct {
                         std.debug.print("while parsing block at {x} ran into existing block {x} - {x}\n", .{ block_start_addr, right_block.start_addr, right_block.end_addr });
                         // we've run into an existing block and must update it with any preceding commands
 
-                        try self.commands.ensureUnusedCapacity(right_block.commands_count);
-                        const start = right_block.commands_index;
-                        const stop = start + right_block.commands_count;
-                        const existing_commands = self.commands.items[start..stop];
+                        try self.commands.ensureUnusedCapacity(right_block.commands.getLen());
+                        const existing_commands = self.commands.items[right_block.commands.start..right_block.commands.stop];
                         self.commands.appendSliceAssumeCapacity(existing_commands);
 
                         right_block.start_addr = block_start_addr;
-                        right_block.commands_index = @intCast(first_command_index);
-                        right_block.commands_count = @intCast(self.commands.items[first_command_index..].len);
+                        right_block.commands.start = @intCast(first_command_index);
+                        right_block.commands.stop = @intCast(self.commands.items.len);
                         break :block_loop;
                     }
                 }
@@ -152,8 +154,10 @@ pub const CommandParser = struct {
                         const new_block = CommandBlock{
                             .start_addr = block_start_addr,
                             .end_addr = cmd_end,
-                            .commands_index = @intCast(first_command_index),
-                            .commands_count = @intCast(self.commands.items[first_command_index..].len),
+                            .commands = IndexSlice{
+                                .start = @intCast(first_command_index),
+                                .stop = @intCast(self.commands.items.len),
+                            },
                         };
                         try self.blocks.append(new_block);
                         std.sort.insertion(CommandBlock, self.blocks.items, {}, CommandBlock.lessThan);
@@ -267,8 +271,10 @@ pub const CommandParser = struct {
         return ParseResult{
             .command = Command{
                 .tag = tag,
-                .args_index = @intCast(first_arg_index),
-                .args_count = @intCast(self.args.items[first_arg_index..].len),
+                .args = IndexSlice{
+                    .start = @intCast(first_arg_index),
+                    .stop = @intCast(self.args.items.len),
+                },
             },
             .end_address = @intCast(fbs.pos),
         };
@@ -382,8 +388,7 @@ fn parseArg(reader: anytype) !Arg {
 
 pub const Command = struct {
     tag: Tag,
-    args_index: u16,
-    args_count: u16,
+    args: IndexSlice,
 
     const Tag = enum(u8) {
         EXIT,
