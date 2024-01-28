@@ -17,16 +17,19 @@ pub const CommandParser = struct {
     commands: std.ArrayList(Command),
     args: std.ArrayList(Arg),
     vars: ArgMap,
+    labels: AddressArraySet,
     visited_branches: AddressSet,
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
     const ArgMap = std.AutoArrayHashMap(u16, VarType);
+    const AddressArraySet = std.AutoArrayHashMap(u16, void);
     const AddressSet = std.AutoHashMap(u16, void);
 
     pub const VarType = enum {
         byte,
         word,
         dword,
+        table,
     };
 
     const header_address = 0x6af6;
@@ -43,12 +46,25 @@ pub const CommandParser = struct {
         self.vars.sort(C{ .keys = self.vars.keys() });
     }
 
+    pub fn sortLabelsByAddress(self: *CommandParser) void {
+        const C = struct {
+            keys: []u16,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.keys[a_index] < ctx.keys[b_index];
+            }
+        };
+
+        self.labels.sort(C{ .keys = self.labels.keys() });
+    }
+
     pub fn init(allocator: std.mem.Allocator, genesis_memory: []const u8) CommandParser {
         const branch_queue = BranchQueue.init(allocator);
         const blocks = std.ArrayList(CommandBlock).init(allocator);
         const commands = std.ArrayList(Command).init(allocator);
         const args = std.ArrayList(Arg).init(allocator);
         const vars = ArgMap.init(allocator);
+        const labels = AddressArraySet.init(allocator);
         const visited_branches = AddressSet.init(allocator);
 
         return .{
@@ -59,6 +75,7 @@ pub const CommandParser = struct {
             .commands = commands,
             .args = args,
             .vars = vars,
+            .labels = labels,
             .visited_branches = visited_branches,
         };
     }
@@ -69,6 +86,7 @@ pub const CommandParser = struct {
         self.commands.deinit();
         self.args.deinit();
         self.vars.deinit();
+        self.labels.deinit();
         self.visited_branches.deinit();
     }
 
@@ -92,6 +110,7 @@ pub const CommandParser = struct {
     }
 
     pub fn parseCommandsRecursively(self: *CommandParser, start_address: u16) !void {
+        try self.labels.put(start_address, {});
         try self.branch_queue.writeItem(start_address);
 
         while (self.branch_queue.readItem()) |block_start_addr| {
@@ -133,7 +152,7 @@ pub const CommandParser = struct {
 
                 try self.commands.append(cmd);
                 try self.queueCommandBranches(cmd);
-                try self.trackUsedVars(cmd);
+                try self.trackCommandVars(cmd);
 
                 switch (cmd.tag.getFlowType()) {
                     .fallthrough => {
@@ -146,7 +165,7 @@ pub const CommandParser = struct {
 
                         try self.commands.append(conditional_cmd);
                         try self.queueCommandBranches(conditional_cmd);
-                        try self.trackUsedVars(conditional_cmd);
+                        try self.trackCommandVars(conditional_cmd);
 
                         cur_addr = conditional_cmd_end;
                     },
@@ -187,20 +206,40 @@ pub const CommandParser = struct {
         };
     }
 
-    fn trackUsedVars(self: *CommandParser, command: Command) !void {
-        const args = self.getCommandArgs(command);
+    fn trackCommandVars(self: *CommandParser, command: Command) !void {
+        var args = self.getCommandArgs(command);
 
-        for (args) |arg| {
-            const var_type = switch (arg) {
-                .indirect1 => VarType.byte,
-                .indirect2 => VarType.word,
-                .indirect4 => VarType.dword,
-                else => continue,
-            };
-            const addr = try arg.getAddress();
-            const maybe_existing = try self.vars.fetchPut(addr, var_type);
-            if (maybe_existing) |entry| {
-                std.debug.assert(entry.value == var_type);
+        switch (command.tag) {
+            .GOTO, .GOSUB => {},
+            .ONGOTO, .ONGOSUB => {
+                // first 2 args could be vars, not any subsequent ones
+                try self.trackArgIfVar(args[0], null);
+                try self.trackArgIfVar(args[1], null);
+            },
+            .GETABLE => {
+                // first arg could be var
+                // second must be table
+                // third should be var
+                try self.trackArgIfVar(args[0], null);
+                try self.trackArgIfVar(args[1], VarType.table);
+                try self.trackArgIfVar(args[2], null);
+            },
+            else => {
+                for (args) |arg| {
+                    try self.trackArgIfVar(arg, null);
+                }
+            },
+        }
+    }
+
+    fn trackArgIfVar(self: *CommandParser, arg: Arg, explicit_var_type: ?VarType) !void {
+        const var_type = explicit_var_type orelse arg.maybeGetVarType() orelse return;
+        const address = try arg.getAddress();
+        const maybe_existing = try self.vars.fetchPut(address, var_type);
+        if (maybe_existing) |existing_entry| {
+            const existing_var_type = existing_entry.value;
+            if (existing_var_type != var_type) {
+                std.debug.print("var type mismatch for address {x}, existing: {s}, new: {s}\n", .{ address, @tagName(existing_var_type), @tagName(var_type) });
             }
         }
     }
@@ -212,6 +251,7 @@ pub const CommandParser = struct {
             .ONGOTO, .ONGOSUB => {
                 for (command_args[2..]) |arg| {
                     const addr = try arg.getAddress();
+                    try self.labels.put(addr, {});
                     if (self.visited_branches.contains(addr)) continue;
                     try self.visited_branches.putNoClobber(addr, {});
                     try self.branch_queue.writeItem(addr);
@@ -220,6 +260,7 @@ pub const CommandParser = struct {
             },
             .GOTO, .GOSUB => {
                 const addr = try command_args[0].getAddress();
+                try self.labels.put(addr, {});
                 if (self.visited_branches.contains(addr)) return;
                 try self.visited_branches.putNoClobber(addr, {});
                 try self.branch_queue.writeItem(addr);
@@ -248,21 +289,21 @@ pub const CommandParser = struct {
 
         switch (tag) {
             .ONGOTO, .ONGOSUB => {
-                const branch_to_take = try parseArg(r);
-                const num_branches = try parseArg(r);
+                const branch_to_take = try readArg(r);
+                const num_branches = try readArg(r);
 
                 try self.args.append(branch_to_take);
                 try self.args.append(num_branches);
 
                 for (0..num_branches.immediate) |_| {
-                    const arg = try parseArg(r);
+                    const arg = try readArg(r);
                     try self.args.append(arg);
                 }
             },
             else => {
                 const arg_count = tag.getArgCount();
                 for (0..arg_count) |_| {
-                    const arg = try parseArg(r);
+                    const arg = try readArg(r);
                     try self.args.append(arg);
                 }
             },
@@ -275,6 +316,7 @@ pub const CommandParser = struct {
                     .start = @intCast(first_arg_index),
                     .stop = @intCast(self.args.items.len),
                 },
+                .address = address,
             },
             .end_address = @intCast(fbs.pos),
         };
@@ -291,6 +333,100 @@ pub const CommandParser = struct {
             .first_command_address = std.mem.readIntLittle(u16, header_bytes[18..20]),
         };
     }
+
+    const Arg = union(enum) {
+        immediate: u32,
+        indirect1: u16,
+        indirect2: u16,
+        indirect4: u16,
+        level_text_offset: u16,
+        mem_address: u16,
+
+        pub fn writeString(self: Arg, writer: anytype) !void {
+            switch (self) {
+                .immediate => |val| try writer.print("{x}", .{val}),
+                .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
+                .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
+                .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
+                .level_text_offset => |offset| try writer.print("text[{x}]", .{offset}),
+                .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
+            }
+        }
+
+        fn getScalar(arg: Arg) !u32 {
+            return switch (arg) {
+                .immediate => |val| val,
+                else => error.WrongArgType,
+            };
+        }
+
+        fn getAddress(arg: Arg) !u16 {
+            return switch (arg) {
+                .indirect1, .indirect2, .indirect4, .level_text_offset, .mem_address => |addr| addr,
+                else => error.WrongArgType,
+            };
+        }
+
+        fn maybeGetVarType(arg: Arg) ?VarType {
+            return switch (arg) {
+                .indirect1 => VarType.byte,
+                .indirect2 => VarType.word,
+                .indirect4 => VarType.dword,
+                else => null,
+            };
+        }
+
+        const Encoding = enum {
+            immediate1,
+            immediate2,
+            immediate4,
+            indirect1,
+            indirect2,
+            indirect4,
+            level_text_offset,
+            mem_address,
+
+            fn fromMetaByte(meta_byte: i8) Encoding {
+                const even = @mod(meta_byte, 2) == 0;
+
+                if (meta_byte == 0) return .immediate1;
+
+                if (meta_byte == 4) return .immediate4;
+
+                if (meta_byte > 0 and even) return .immediate2;
+
+                if (meta_byte == -0x80) return .level_text_offset;
+
+                if (meta_byte < 0) return .mem_address;
+
+                if (meta_byte == 1) return .indirect1;
+
+                if (meta_byte == 3) return .indirect2;
+
+                return .indirect4;
+                // TODO see if these relaxed requirements can be more specific
+                // i.e. instead of "any even positive" maybe it happens to always be 2 in practice
+            }
+        };
+    };
+
+    fn readArg(reader: anytype) !Arg {
+        const meta_byte = try reader.readByteSigned();
+
+        const arg_type = Arg.Encoding.fromMetaByte(meta_byte);
+        std.debug.print("{s} meta_byte {x}\n", .{ @tagName(arg_type), meta_byte });
+
+        return switch (arg_type) {
+            .immediate1 => .{ .immediate = try reader.readByte() },
+            .immediate2 => .{ .immediate = try reader.readIntLittle(u16) },
+            .immediate4 => .{ .immediate = try reader.readIntLittle(u32) },
+            .indirect1 => .{ .indirect1 = try reader.readIntLittle(u16) },
+            .indirect2 => .{ .indirect2 = try reader.readIntLittle(u16) },
+            .indirect4 => .{ .indirect4 = try reader.readIntLittle(u16) },
+            .level_text_offset => .{ .level_text_offset = try reader.readIntLittle(u16) },
+            .mem_address => .{ .mem_address = try reader.readIntLittle(u16) },
+        };
+    }
 };
 
 const EclHeader = struct {
@@ -301,94 +437,10 @@ const EclHeader = struct {
     first_command_address: u16,
 };
 
-const Arg = union(enum) {
-    immediate: u32,
-    indirect1: u16,
-    indirect2: u16,
-    indirect4: u16,
-    level_text_offset: u16,
-    mem_address: u16,
-
-    pub fn writeString(self: Arg, writer: anytype) !void {
-        switch (self) {
-            .immediate => |val| try writer.print("{x}", .{val}),
-            .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
-            .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
-            .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
-            .level_text_offset => |offset| try writer.print("text[{x}]", .{offset}),
-            .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
-        }
-    }
-
-    fn getScalar(arg: Arg) !u32 {
-        return switch (arg) {
-            .immediate => |val| val,
-            else => error.WrongArgType,
-        };
-    }
-
-    fn getAddress(arg: Arg) !u16 {
-        return switch (arg) {
-            .indirect1, .indirect2, .indirect4, .level_text_offset, .mem_address => |addr| addr,
-            else => error.WrongArgType,
-        };
-    }
-
-    const Encoding = enum {
-        immediate1,
-        immediate2,
-        immediate4,
-        indirect1,
-        indirect2,
-        indirect4,
-        level_text_offset,
-        mem_address,
-
-        fn fromMetaByte(meta_byte: i8) Encoding {
-            const even = @mod(meta_byte, 2) == 0;
-
-            if (meta_byte == 0) return .immediate1;
-
-            if (meta_byte == 4) return .immediate4;
-
-            if (meta_byte > 0 and even) return .immediate2;
-
-            if (meta_byte == -0x80) return .level_text_offset;
-
-            if (meta_byte < 0) return .mem_address;
-
-            if (meta_byte == 1) return .indirect1;
-
-            if (meta_byte == 3) return .indirect2;
-
-            return .indirect4;
-            // TODO see if these relaxed requirements can be more specific
-            // i.e. instead of "any even positive" maybe it happens to always be 2 in practice
-        }
-    };
-};
-
-fn parseArg(reader: anytype) !Arg {
-    const meta_byte = try reader.readByteSigned();
-
-    const arg_type = Arg.Encoding.fromMetaByte(meta_byte);
-    std.debug.print("{s} meta_byte {x}\n", .{ @tagName(arg_type), meta_byte });
-
-    return switch (arg_type) {
-        .immediate1 => .{ .immediate = try reader.readByte() },
-        .immediate2 => .{ .immediate = try reader.readIntLittle(u16) },
-        .immediate4 => .{ .immediate = try reader.readIntLittle(u32) },
-        .indirect1 => .{ .indirect1 = try reader.readIntLittle(u16) },
-        .indirect2 => .{ .indirect2 = try reader.readIntLittle(u16) },
-        .indirect4 => .{ .indirect4 = try reader.readIntLittle(u16) },
-        .level_text_offset => .{ .level_text_offset = try reader.readIntLittle(u16) },
-        .mem_address => .{ .mem_address = try reader.readIntLittle(u16) },
-    };
-}
-
 pub const Command = struct {
     tag: Tag,
     args: IndexSlice,
+    address: u16,
 
     const Tag = enum(u8) {
         EXIT,
@@ -490,7 +542,7 @@ pub const Command = struct {
 
         fn getFlowType(command_tag: Tag) FlowType {
             return switch (command_tag) {
-                .EXIT, .GOTO, .RETURN, .ONGOTO => .terminal,
+                .EXIT, .GOTO, .RETURN, .ONGOTO, .ENCEXIT => .terminal,
                 .IFEQ, .IFNE, .IFLT, .IFGT, .IFLE, .IFGE => .conditional,
                 else => .fallthrough,
             };
