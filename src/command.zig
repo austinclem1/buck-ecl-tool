@@ -29,7 +29,6 @@ pub const CommandParser = struct {
         byte,
         word,
         dword,
-        table,
     };
 
     const header_address = 0x6af6;
@@ -215,14 +214,6 @@ pub const CommandParser = struct {
                 // first 2 args could be vars, not any subsequent ones
                 try self.trackArgIfVar(args[0], null);
                 try self.trackArgIfVar(args[1], null);
-            },
-            .GETABLE => {
-                // first arg could be var
-                // second must be table
-                // third should be var
-                try self.trackArgIfVar(args[0], null);
-                try self.trackArgIfVar(args[1], VarType.table);
-                try self.trackArgIfVar(args[2], null);
             },
             else => {
                 for (args) |arg| {
