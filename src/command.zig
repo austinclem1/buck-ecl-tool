@@ -19,6 +19,7 @@ pub const CommandParser = struct {
     vars: ArgMap,
     labels: AddressArraySet,
     visited_branches: AddressSet,
+    strings: std.ArrayList(String),
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
     const ArgMap = std.AutoArrayHashMap(u16, VarType);
@@ -65,6 +66,7 @@ pub const CommandParser = struct {
         const vars = ArgMap.init(allocator);
         const labels = AddressArraySet.init(allocator);
         const visited_branches = AddressSet.init(allocator);
+        const strings = std.ArrayList(String).init(allocator);
 
         return .{
             .allocator = allocator,
@@ -76,6 +78,7 @@ pub const CommandParser = struct {
             .vars = vars,
             .labels = labels,
             .visited_branches = visited_branches,
+            .strings = strings,
         };
     }
 
@@ -87,7 +90,13 @@ pub const CommandParser = struct {
         self.vars.deinit();
         self.labels.deinit();
         self.visited_branches.deinit();
+        self.strings.deinit();
     }
+
+    const String = struct {
+        bytes: []const u8,
+        offset: u16,
+    };
 
     const CommandBlock = struct {
         start_addr: u16,
@@ -99,6 +108,21 @@ pub const CommandParser = struct {
             return a.start_addr < b.start_addr;
         }
     };
+
+    pub fn readStrings(self: *CommandParser, start_address: u16, end_address: u16) !void {
+        var cur_address = start_address;
+        while (cur_address < end_address) {
+            const remaining_memory = self.genesis_memory[cur_address..];
+            const s = std.mem.sliceTo(remaining_memory, '\x00');
+            if (s.len > 0) {
+                try self.strings.append(String{
+                    .bytes = s,
+                    .offset = cur_address - start_address,
+                });
+            }
+            cur_address += @intCast(s.len + 1);
+        }
+    }
 
     pub fn getBlockCommands(self: *const CommandParser, block: CommandBlock) []Command {
         return self.commands.items[block.commands.start..block.commands.stop];
@@ -287,6 +311,45 @@ pub const CommandParser = struct {
                 try self.args.append(num_branches);
 
                 for (0..num_branches.immediate) |_| {
+                    const arg = try readArg(r);
+                    try self.args.append(arg);
+                }
+            },
+            // first arg is where choices are located
+            // second arg is num choices
+            // rest are the choices
+            .HMENU, .WHMENU => {
+                const choices_base = try readArg(r);
+                const num_choices = try readArg(r);
+
+                try self.args.append(choices_base);
+                try self.args.append(num_choices);
+
+                for (0..num_choices.immediate) |_| {
+                    const arg = try readArg(r);
+                    try self.args.append(arg);
+                }
+            },
+            .TREASURE => {
+                const unknown1 = try readArg(r);
+                const num_items = try readArg(r);
+
+                try self.args.append(unknown1);
+                try self.args.append(num_items);
+
+                for (0..num_items.immediate) |_| {
+                    const arg = try readArg(r);
+                    try self.args.append(arg);
+                }
+            },
+            .NEWREGION => {
+                const unknown1 = try readArg(r);
+                const num_tiles = try readArg(r);
+
+                try self.args.append(unknown1);
+                try self.args.append(num_tiles);
+
+                for (0..num_tiles.immediate * 4) |_| {
                     const arg = try readArg(r);
                     try self.args.append(arg);
                 }
@@ -533,7 +596,7 @@ pub const Command = struct {
 
         fn getFlowType(command_tag: Tag) FlowType {
             return switch (command_tag) {
-                .EXIT, .GOTO, .RETURN, .ONGOTO, .ENCEXIT => .terminal,
+                .EXIT, .GOTO, .RETURN, .ENCEXIT => .terminal,
                 .IFEQ, .IFNE, .IFLT, .IFGT, .IFLE, .IFGE => .conditional,
                 else => .fallthrough,
             };
@@ -579,17 +642,17 @@ pub const Command = struct {
                 .COMBAT => 0x00,
                 .ONGOTO => 0x02, // NOTE: I changed this from 0 to 2
                 .ONGOSUB => 0x02,
-                .TREASURE => 0x00,
+                .TREASURE => 0x02, // NOTE: changed from 0 to 2
                 .ROB => 0x03,
                 .CONTINUE => 0x00,
                 .GETABLE => 0x03,
-                .HMENU => 0x00,
+                .HMENU => 0x02, // NOTE: changed from 0 to 2
                 .GETYN => 0x00,
                 .DRAWINDOW => 0x00,
                 .DAMAGE => 0x05,
                 .AND => 0x03,
                 .OR => 0x03,
-                .WHMENU => 0x00,
+                .WHMENU => 0x02, // NOTE: changed from 0 to 2
                 .FINDITEM => 0x01,
                 .PRINTRETURN => 0x00,
                 .CLOCK => 0x01,
