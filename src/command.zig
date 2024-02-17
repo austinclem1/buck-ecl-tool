@@ -34,6 +34,24 @@ pub const CommandParser = struct {
 
     const header_address = 0x6af6;
 
+    pub fn ensureStringArgsAccountedFor(self: *const CommandParser) !void {
+        for (self.commands.items) |cmd| {
+            for (self.getCommandArgs(cmd)) |arg| {
+                switch (arg) {
+                    .level_text_offset => |offset| {
+                        for (self.strings.items) |str| {
+                            if (offset == str.offset) break;
+                        } else {
+                            std.debug.print("{x}\n", .{offset});
+                            return error.StringOffsetNotFound;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
     pub fn sortVarsByAddress(self: *CommandParser) void {
         const C = struct {
             keys: []u16,
@@ -110,17 +128,40 @@ pub const CommandParser = struct {
     };
 
     pub fn readStrings(self: *CommandParser, start_address: u16, end_address: u16) !void {
-        var cur_address = start_address;
-        while (cur_address < end_address) {
-            const remaining_memory = self.genesis_memory[cur_address..];
-            const s = std.mem.sliceTo(remaining_memory, '\x00');
-            if (s.len > 0) {
-                try self.strings.append(String{
-                    .bytes = s,
-                    .offset = cur_address - start_address,
-                });
+        const bytes = self.genesis_memory[start_address..end_address];
+
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const slice = std.mem.sliceTo(bytes[i..], '\x00');
+            try self.strings.append(String{
+                .bytes = slice,
+                .offset = @intCast(i),
+            });
+            i += slice.len + 1;
+        }
+    }
+
+    pub fn detectVariableAliasing(self: *const CommandParser) !void {
+        var it = self.vars.iterator();
+
+        var prev_var = it.next() orelse return;
+
+        while (it.next()) |cur_var| : (prev_var = cur_var) {
+            const prev_address = prev_var.key_ptr.*;
+            const prev_size: u16 = switch (prev_var.value_ptr.*) {
+                .byte => 1,
+                .word => 2,
+                .dword => 4,
+            };
+
+            const cur_address = cur_var.key_ptr.*;
+
+            std.debug.print("{x}: {s}, {x}: {s}\n", .{ prev_address, @tagName(prev_var.value_ptr.*), cur_address, @tagName(cur_var.value_ptr.*) });
+
+            if (cur_address < prev_address + prev_size) {
+                std.debug.assert(false);
+                return error.VariablesAlias;
             }
-            cur_address += @intCast(s.len + 1);
         }
     }
 
@@ -402,7 +443,7 @@ pub const CommandParser = struct {
                 .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
                 .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
                 .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
-                .level_text_offset => |offset| try writer.print("text[{x}]", .{offset}),
+                .level_text_offset => |offset| try writer.print("str_{x}", .{offset}),
                 .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
             }
         }
