@@ -338,8 +338,11 @@ pub const CommandParser = struct {
         const r = fbs.reader();
 
         const command_code = try r.readByte();
-        const tag: Command.Tag =
-            if (command_code < Command.Tag.count) @enumFromInt(command_code) else return error.InvalidCommandCode;
+        if (command_code >= Command.Tag.count) {
+            std.debug.print("error: invalid command code at address {x}\n", .{address});
+            return error.InvalidCommandCode;
+        }
+        const tag: Command.Tag = @enumFromInt(command_code);
 
         const first_arg_index = self.args.items.len;
 
