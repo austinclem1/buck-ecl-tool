@@ -1,5 +1,19 @@
 const std = @import("std");
 
+const ecl_base = 0x6af6;
+const header_size = 20;
+
+// game globals
+// land_type 97ad
+// combat region 97dc
+// wall type 97f8
+// for_loop_i 98ec
+// player_y 9af6
+// player_x 9af7
+// player_dir 9afa
+// scratch? 9e6f
+// attack location 9e78
+
 const IndexSlice = struct {
     start: u16,
     stop: u16,
@@ -12,14 +26,15 @@ const IndexSlice = struct {
 pub const CommandParser = struct {
     allocator: std.mem.Allocator,
     genesis_memory: []const u8,
-    branch_queue: BranchQueue,
-    blocks: std.ArrayList(CommandBlock),
+    script: []const u8,
+    text: []const u8,
     commands: std.ArrayList(Command),
     args: std.ArrayList(Arg),
     vars: ArgMap,
     labels: AddressArraySet,
-    visited_branches: AddressSet,
     strings: std.ArrayList(String),
+    initialized_bytes: ?[]const u8,
+    highest_known_command_address: u16,
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
     const ArgMap = std.AutoArrayHashMap(u16, VarType);
@@ -76,38 +91,42 @@ pub const CommandParser = struct {
         self.labels.sort(C{ .keys = self.labels.keys() });
     }
 
-    pub fn init(allocator: std.mem.Allocator, genesis_memory: []const u8) CommandParser {
-        const branch_queue = BranchQueue.init(allocator);
-        const blocks = std.ArrayList(CommandBlock).init(allocator);
+    pub fn init(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !CommandParser {
+        var genesis_memory = try allocator.alloc(u8, 64 * 1024);
+        errdefer allocator.free(genesis_memory);
+
+        const script_end = ecl_base + script_bytes.len;
+        const text_end = script_end + text_bytes.len;
+        @memcpy(genesis_memory[ecl_base..script_end], script_bytes);
+        @memcpy(genesis_memory[script_end..text_end], text_bytes);
+
         const commands = std.ArrayList(Command).init(allocator);
         const args = std.ArrayList(Arg).init(allocator);
         const vars = ArgMap.init(allocator);
         const labels = AddressArraySet.init(allocator);
-        const visited_branches = AddressSet.init(allocator);
         const strings = std.ArrayList(String).init(allocator);
 
         return .{
             .allocator = allocator,
             .genesis_memory = genesis_memory,
-            .branch_queue = branch_queue,
-            .blocks = blocks,
+            .script = genesis_memory[ecl_base..script_end],
+            .text = genesis_memory[script_end..text_end],
             .commands = commands,
             .args = args,
             .vars = vars,
             .labels = labels,
-            .visited_branches = visited_branches,
             .strings = strings,
+            .initialized_bytes = null,
+            .highest_known_command_address = 0,
         };
     }
 
     pub fn deinit(self: *CommandParser) void {
-        self.branch_queue.deinit();
-        self.blocks.deinit();
+        self.allocator.free(self.genesis_memory);
         self.commands.deinit();
         self.args.deinit();
         self.vars.deinit();
         self.labels.deinit();
-        self.visited_branches.deinit();
         self.strings.deinit();
     }
 
@@ -127,12 +146,10 @@ pub const CommandParser = struct {
         }
     };
 
-    pub fn readStrings(self: *CommandParser, start_address: u16, end_address: u16) !void {
-        const bytes = self.genesis_memory[start_address..end_address];
-
+    pub fn readStrings(self: *CommandParser, text: []const u8) !void {
         var i: usize = 0;
-        while (i < bytes.len) {
-            const slice = std.mem.sliceTo(bytes[i..], '\x00');
+        while (i < text.len) {
+            const slice = std.mem.sliceTo(text[i..], '\x00');
             try self.strings.append(String{
                 .bytes = slice,
                 .offset = @intCast(i),
@@ -141,7 +158,8 @@ pub const CommandParser = struct {
         }
     }
 
-    pub fn detectVariableAliasing(self: *const CommandParser) !void {
+    // variables must be sorted by address for this to work
+    pub fn detectVariableAliasing(self: *const CommandParser) void {
         var it = self.vars.iterator();
 
         var prev_var = it.next() orelse return;
@@ -156,11 +174,9 @@ pub const CommandParser = struct {
 
             const cur_address = cur_var.key_ptr.*;
 
-            std.debug.print("{x}: {s}, {x}: {s}\n", .{ prev_address, @tagName(prev_var.value_ptr.*), cur_address, @tagName(cur_var.value_ptr.*) });
-
             if (cur_address < prev_address + prev_size) {
-                std.debug.assert(false);
-                return error.VariablesAlias;
+                std.debug.print("alias detected: {x}: {s}, {x}: {s}\n", .{ prev_address, @tagName(prev_var.value_ptr.*), cur_address, @tagName(cur_var.value_ptr.*) });
+                // return error.VariablesAlias;
             }
         }
     }
@@ -173,101 +189,75 @@ pub const CommandParser = struct {
         return self.args.items[cmd.args.start..cmd.args.stop];
     }
 
-    pub fn parseCommandsRecursively(self: *CommandParser, start_address: u16) !void {
-        try self.labels.put(start_address, {});
-        try self.branch_queue.writeItem(start_address);
+    pub fn parseEcl(self: *CommandParser) !void {
+        try self.readStrings(self.text);
 
-        while (self.branch_queue.readItem()) |block_start_addr| {
-            const surrounding_blocks = self.getBlocksSurroundingAddress(block_start_addr);
-            if (surrounding_blocks.left) |left_block| {
-                if (block_start_addr < left_block.end_addr) {
-                    std.debug.print("skipping parsing block at {x}, already included in block {x} - {x}\n", .{ block_start_addr, left_block.start_addr, left_block.end_addr });
-                    continue; // already parsed these commands
-                }
+        const ecl_header = self.parseEclHeader();
+
+        try self.addLabelAndTrackHighestAddress(ecl_header.a);
+        try self.addLabelAndTrackHighestAddress(ecl_header.b);
+        try self.addLabelAndTrackHighestAddress(ecl_header.c);
+        try self.addLabelAndTrackHighestAddress(ecl_header.d);
+        try self.addLabelAndTrackHighestAddress(ecl_header.first_command_address);
+
+        var cur_addr: u16 = ecl_base + header_size;
+        while (cur_addr <= self.highest_known_command_address) {
+            std.debug.assert(self.highest_known_command_address <= ecl_base + self.script.len);
+            const cmd_size = try self.parseCommand(cur_addr);
+
+            const cmd = self.commands.getLast();
+            try self.trackCommandLabels(cmd);
+            try self.trackCommandVars(cmd);
+
+            switch (cmd.tag.getFlowType()) {
+                .fallthrough => {
+                    cur_addr += cmd_size;
+                    self.highest_known_command_address = @max(cur_addr, self.highest_known_command_address);
+                },
+                .conditional => {
+                    const next_cmd_address = cur_addr + cmd_size;
+                    const next_cmd_size = try self.parseCommand(next_cmd_address);
+
+                    const next_cmd = self.commands.getLast();
+                    try self.trackCommandLabels(next_cmd);
+                    try self.trackCommandVars(next_cmd);
+
+                    cur_addr = next_cmd_address + next_cmd_size;
+                    self.highest_known_command_address = @max(cur_addr, self.highest_known_command_address);
+                },
+                .terminal => {
+                    cur_addr += cmd_size;
+                },
             }
+        }
 
-            std.debug.print("parsing block at {x}\n", .{block_start_addr});
-
-            const first_command_index = self.commands.items.len;
-
-            var cur_addr = block_start_addr;
-            block_loop: while (true) {
-                if (surrounding_blocks.right) |right_block| {
-                    if (cur_addr == right_block.start_addr) {
-                        std.debug.print("while parsing block at {x} ran into existing block {x} - {x}\n", .{ block_start_addr, right_block.start_addr, right_block.end_addr });
-                        // we've run into an existing block and must update it with any preceding commands
-
-                        try self.commands.ensureUnusedCapacity(right_block.commands.getLen());
-                        const existing_commands = self.commands.items[right_block.commands.start..right_block.commands.stop];
-                        self.commands.appendSliceAssumeCapacity(existing_commands);
-
-                        right_block.start_addr = block_start_addr;
-                        right_block.commands.start = @intCast(first_command_index);
-                        right_block.commands.stop = @intCast(self.commands.items.len);
-                        break :block_loop;
-                    }
-                }
-
-                var parse_result: ParseResult = undefined;
-
-                parse_result = try self.parseCommand(cur_addr);
-                const cmd = parse_result.command;
-                const cmd_end = parse_result.end_address;
-
-                try self.commands.append(cmd);
-                try self.queueCommandBranches(cmd);
-                try self.trackCommandVars(cmd);
-
-                switch (cmd.tag.getFlowType()) {
-                    .fallthrough => {
-                        cur_addr = cmd_end;
-                    },
-                    .conditional => {
-                        parse_result = try self.parseCommand(cmd_end);
-                        const conditional_cmd = parse_result.command;
-                        const conditional_cmd_end = parse_result.end_address;
-
-                        try self.commands.append(conditional_cmd);
-                        try self.queueCommandBranches(conditional_cmd);
-                        try self.trackCommandVars(conditional_cmd);
-
-                        cur_addr = conditional_cmd_end;
-                    },
-                    .terminal => {
-                        const new_block = CommandBlock{
-                            .start_addr = block_start_addr,
-                            .end_addr = cmd_end,
-                            .commands = IndexSlice{
-                                .start = @intCast(first_command_index),
-                                .stop = @intCast(self.commands.items.len),
-                            },
-                        };
-                        try self.blocks.append(new_block);
-                        std.sort.insertion(CommandBlock, self.blocks.items, {}, CommandBlock.lessThan);
-                        break :block_loop;
-                    },
-                }
-            }
+        const cur_script_offset = cur_addr - ecl_base;
+        if (cur_script_offset < self.script.len) {
+            self.initialized_bytes = self.script[cur_script_offset..];
         }
     }
 
-    fn getBlocksSurroundingAddress(self: *const CommandParser, address: u16) struct {
-        left: ?*CommandBlock,
-        right: ?*CommandBlock,
-    } {
-        var left_index: ?usize = null;
-        for (self.blocks.items, 0..) |block, i| {
-            if (block.start_addr > address) break;
-            left_index = i;
+    fn addLabelAndTrackHighestAddress(self: *CommandParser, address: u16) !void {
+        self.highest_known_command_address = @max(address, self.highest_known_command_address);
+        try self.labels.put(address, {});
+    }
+
+    fn trackCommandLabels(self: *CommandParser, command: Command) !void {
+        const args = self.getCommandArgs(command);
+
+        switch (command.tag) {
+            .ONGOTO, .ONGOSUB => {
+                for (args[2..]) |arg| {
+                    const address = try arg.getAddress();
+                    try self.addLabelAndTrackHighestAddress(address);
+                }
+            },
+            .GOTO, .GOSUB => {
+                const address = try args[0].getAddress();
+                try self.addLabelAndTrackHighestAddress(address);
+            },
+            else => {},
         }
-
-        var right_index: ?usize = if (left_index) |li| li + 1 else 0;
-        if (right_index.? >= self.blocks.items.len) right_index = null;
-
-        return .{
-            .left = if (left_index) |li| &self.blocks.items[li] else null,
-            .right = if (right_index) |ri| &self.blocks.items[ri] else null,
-        };
     }
 
     fn trackCommandVars(self: *CommandParser, command: Command) !void {
@@ -296,33 +286,8 @@ pub const CommandParser = struct {
             const existing_var_type = existing_entry.value;
             if (existing_var_type != var_type) {
                 std.debug.print("var type mismatch for address {x}, existing: {s}, new: {s}\n", .{ address, @tagName(existing_var_type), @tagName(var_type) });
+                //         return error.VariableTypeMismatch;
             }
-        }
-    }
-
-    fn queueCommandBranches(self: *CommandParser, command: Command) !void {
-        const command_args = self.getCommandArgs(command);
-
-        switch (command.tag) {
-            .ONGOTO, .ONGOSUB => {
-                for (command_args[2..]) |arg| {
-                    const addr = try arg.getAddress();
-                    try self.labels.put(addr, {});
-                    if (self.visited_branches.contains(addr)) continue;
-                    try self.visited_branches.putNoClobber(addr, {});
-                    try self.branch_queue.writeItem(addr);
-                    std.debug.print("queued {x}\n", .{addr});
-                }
-            },
-            .GOTO, .GOSUB => {
-                const addr = try command_args[0].getAddress();
-                try self.labels.put(addr, {});
-                if (self.visited_branches.contains(addr)) return;
-                try self.visited_branches.putNoClobber(addr, {});
-                try self.branch_queue.writeItem(addr);
-                std.debug.print("queued {x}\n", .{addr});
-            },
-            else => {},
         }
     }
 
@@ -331,7 +296,7 @@ pub const CommandParser = struct {
         end_address: u16,
     };
 
-    fn parseCommand(self: *CommandParser, address: u16) !ParseResult {
+    fn parseCommand(self: *CommandParser, address: u16) !u16 {
         var fbs = std.io.fixedBufferStream(self.genesis_memory);
         try fbs.seekTo(address);
 
@@ -407,17 +372,15 @@ pub const CommandParser = struct {
             },
         }
 
-        return ParseResult{
-            .command = Command{
-                .tag = tag,
-                .args = IndexSlice{
-                    .start = @intCast(first_arg_index),
-                    .stop = @intCast(self.args.items.len),
-                },
-                .address = address,
+        try self.commands.append(Command{
+            .tag = tag,
+            .args = IndexSlice{
+                .start = @intCast(first_arg_index),
+                .stop = @intCast(self.args.items.len),
             },
-            .end_address = @intCast(fbs.pos),
-        };
+            .address = address,
+        });
+        return @intCast(fbs.pos - address);
     }
 
     pub fn parseEclHeader(self: *const CommandParser) EclHeader {
@@ -512,7 +475,7 @@ pub const CommandParser = struct {
         const meta_byte = try reader.readByteSigned();
 
         const arg_type = Arg.Encoding.fromMetaByte(meta_byte);
-        std.debug.print("{s} meta_byte {x}\n", .{ @tagName(arg_type), meta_byte });
+        // std.debug.print("{s} meta_byte {x}\n", .{ @tagName(arg_type), meta_byte });
 
         return switch (arg_type) {
             .immediate1 => .{ .immediate = try reader.readByte() },
