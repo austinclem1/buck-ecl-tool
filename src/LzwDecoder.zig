@@ -143,7 +143,6 @@ pub fn decodeCode(self: *LzwDecoder, code: u16, last_code: u16) (Allocator.Error
     std.debug.assert(code <= self.dict.len);
     var cur_node: u16 = blk: {
         if (code == self.dict.len) {
-            std.debug.print("dict_len: {x}, code: {x}\n", .{ self.dict.len, code });
             const prev_suffix = self.dict.items(.suffix)[self.dict.len - 1];
             try self.decoding_scratch_space.append(self.allocator, prev_suffix);
             break :blk last_code;
