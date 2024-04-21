@@ -4,14 +4,19 @@ const ecl_base = 0x6af6;
 const header_size = 20;
 
 // game globals
+// maybe window graphic to show 979b
+// unknown bool 97a1
 // land_type 97ad
 // combat region 97dc
+// last active level 97e8
 // wall type 97f8
 // for_loop_i 98ec
 // player_y 9af6
 // player_x 9af7
+// player_room_id 9af9
 // player_dir 9afa
-// scratch? 9e6f
+// selected_character_status 9bf6 (maybe unused in sega version?)
+// 10 bytes scratch_space 9e6f-9e78 (inclusive)
 // attack location 9e78
 
 const IndexSlice = struct {
