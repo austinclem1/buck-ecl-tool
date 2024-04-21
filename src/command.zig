@@ -17,7 +17,6 @@ const header_size = 20;
 // player_dir 9afa
 // selected_character_status 9bf6 (maybe unused in sega version?)
 // 10 bytes scratch_space 9e6f-9e78 (inclusive)
-// attack location 9e78
 
 const IndexSlice = struct {
     start: u16,
@@ -58,7 +57,7 @@ pub const CommandParser = struct {
         for (self.commands.items) |cmd| {
             for (self.getCommandArgs(cmd)) |arg| {
                 switch (arg) {
-                    .level_text_offset => |offset| {
+                    .string => |offset| {
                         for (self.strings.items) |str| {
                             if (offset == str.offset) break;
                         } else {
@@ -405,7 +404,7 @@ pub const CommandParser = struct {
         indirect1: u16,
         indirect2: u16,
         indirect4: u16,
-        level_text_offset: u16,
+        string: u16,
         mem_address: u16,
 
         pub fn writeString(self: Arg, writer: anytype) !void {
@@ -414,7 +413,7 @@ pub const CommandParser = struct {
                 .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
                 .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
                 .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
-                .level_text_offset => |offset| try writer.print("str_{x}", .{offset}),
+                .string => |offset| try writer.print("str_{x}", .{offset}),
                 .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
             }
         }
@@ -428,7 +427,7 @@ pub const CommandParser = struct {
 
         fn getAddress(arg: Arg) !u16 {
             return switch (arg) {
-                .indirect1, .indirect2, .indirect4, .level_text_offset, .mem_address => |addr| addr,
+                .indirect1, .indirect2, .indirect4, .string, .mem_address => |addr| addr,
                 else => error.WrongArgType,
             };
         }
@@ -449,7 +448,7 @@ pub const CommandParser = struct {
             indirect1,
             indirect2,
             indirect4,
-            level_text_offset,
+            string,
             mem_address,
 
             fn fromMetaByte(meta_byte: i8) Encoding {
@@ -461,7 +460,7 @@ pub const CommandParser = struct {
 
                 if (meta_byte > 0 and even) return .immediate2;
 
-                if (meta_byte == -0x80) return .level_text_offset;
+                if (meta_byte == -0x80) return .string;
 
                 if (meta_byte < 0) return .mem_address;
 
@@ -489,7 +488,7 @@ pub const CommandParser = struct {
             .indirect1 => .{ .indirect1 = try reader.readIntLittle(u16) },
             .indirect2 => .{ .indirect2 = try reader.readIntLittle(u16) },
             .indirect4 => .{ .indirect4 = try reader.readIntLittle(u16) },
-            .level_text_offset => .{ .level_text_offset = try reader.readIntLittle(u16) },
+            .string => .{ .string = try reader.readIntLittle(u16) },
             .mem_address => .{ .mem_address = try reader.readIntLittle(u16) },
         };
     }
