@@ -2,6 +2,7 @@ const std = @import("std");
 
 const ecl_base = 0x6af6;
 const header_size = 20;
+var encountered_string_offsets: std.AutoHashMap(u16, void) = undefined;
 
 // game globals
 // maybe window graphic to show 979b
@@ -110,6 +111,8 @@ pub const CommandParser = struct {
         const labels = AddressArraySet.init(allocator);
         const strings = std.ArrayList(String).init(allocator);
 
+        encountered_string_offsets = std.AutoHashMap(u16, void).init(allocator);
+
         return .{
             .allocator = allocator,
             .genesis_memory = genesis_memory,
@@ -132,6 +135,7 @@ pub const CommandParser = struct {
         self.vars.deinit();
         self.labels.deinit();
         self.strings.deinit();
+        encountered_string_offsets.deinit();
     }
 
     const String = struct {
@@ -265,7 +269,7 @@ pub const CommandParser = struct {
     }
 
     fn trackCommandVars(self: *CommandParser, command: Command) !void {
-        var args = self.getCommandArgs(command);
+        const args = self.getCommandArgs(command);
 
         switch (command.tag) {
             .GOTO, .GOSUB => {},
@@ -391,11 +395,11 @@ pub const CommandParser = struct {
         const header_bytes = self.genesis_memory[header_address..];
 
         return .{
-            .a = std.mem.readIntLittle(u16, header_bytes[2..4]),
-            .b = std.mem.readIntLittle(u16, header_bytes[6..8]),
-            .c = std.mem.readIntLittle(u16, header_bytes[10..12]),
-            .d = std.mem.readIntLittle(u16, header_bytes[14..16]),
-            .first_command_address = std.mem.readIntLittle(u16, header_bytes[18..20]),
+            .a = std.mem.readInt(u16, header_bytes[2..4], .little),
+            .b = std.mem.readInt(u16, header_bytes[6..8], .little),
+            .c = std.mem.readInt(u16, header_bytes[10..12], .little),
+            .d = std.mem.readInt(u16, header_bytes[14..16], .little),
+            .first_command_address = std.mem.readInt(u16, header_bytes[18..20], .little),
         };
     }
 
@@ -481,16 +485,23 @@ pub const CommandParser = struct {
         const arg_type = Arg.Encoding.fromMetaByte(meta_byte);
         // std.debug.print("{s} meta_byte {x}\n", .{ @tagName(arg_type), meta_byte });
 
-        return switch (arg_type) {
+        const result: Arg = switch (arg_type) {
             .immediate1 => .{ .immediate = try reader.readByte() },
-            .immediate2 => .{ .immediate = try reader.readIntLittle(u16) },
-            .immediate4 => .{ .immediate = try reader.readIntLittle(u32) },
-            .indirect1 => .{ .indirect1 = try reader.readIntLittle(u16) },
-            .indirect2 => .{ .indirect2 = try reader.readIntLittle(u16) },
-            .indirect4 => .{ .indirect4 = try reader.readIntLittle(u16) },
-            .string => .{ .string = try reader.readIntLittle(u16) },
-            .mem_address => .{ .mem_address = try reader.readIntLittle(u16) },
+            .immediate2 => .{ .immediate = try reader.readInt(u16, .little) },
+            .immediate4 => .{ .immediate = try reader.readInt(u32, .little) },
+            .indirect1 => .{ .indirect1 = try reader.readInt(u16, .little) },
+            .indirect2 => .{ .indirect2 = try reader.readInt(u16, .little) },
+            .indirect4 => .{ .indirect4 = try reader.readInt(u16, .little) },
+            .string => .{ .string = try reader.readInt(u16, .little) },
+            .mem_address => .{ .mem_address = try reader.readInt(u16, .little) },
         };
+        switch (result) {
+            .string => |offset| {
+                try encountered_string_offsets.putNoClobber(offset, {});
+            },
+            else => {},
+        }
+        return result;
     }
 };
 

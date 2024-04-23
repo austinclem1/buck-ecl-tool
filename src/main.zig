@@ -109,7 +109,7 @@ fn getCompressedScriptAddress(rom_file: File, id: u8) !u32 {
     const level_index = std.mem.indexOfScalar(u8, &level_ids, id) orelse return error.LevelIdNotFound;
 
     try rom_file.seekTo(compressedScriptsTableAddr + level_index * 4);
-    const offset = try rom_file.reader().readIntBig(u32);
+    const offset = try rom_file.reader().readInt(u32, .big);
 
     return compressedScriptsTableAddr + offset;
 }
@@ -118,7 +118,7 @@ fn getCompressedTextAddress(rom_file: File, id: u8) !u32 {
     const level_index = std.mem.indexOfScalar(u8, &level_ids, id) orelse return error.LevelIdNotFound;
 
     try rom_file.seekTo(compressedTextTableAddr + level_index * 4);
-    const offset = try rom_file.reader().readIntBig(u32);
+    const offset = try rom_file.reader().readInt(u32, .big);
 
     return compressedTextTableAddr + offset;
 }
