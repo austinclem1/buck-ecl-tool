@@ -200,7 +200,7 @@ pub const CommandParser = struct {
     pub fn parseEcl(self: *CommandParser) !void {
         try self.readStrings(self.text);
 
-        const ecl_header = self.parseEclHeader();
+        const ecl_header = parseEclHeader(self.genesis_memory[ecl_base .. ecl_base + header_size]);
 
         try self.addLabelAndTrackHighestAddress(ecl_header.a);
         try self.addLabelAndTrackHighestAddress(ecl_header.b);
@@ -243,6 +243,16 @@ pub const CommandParser = struct {
         if (cur_script_offset < self.script.len) {
             self.initialized_bytes = self.script[cur_script_offset..];
         }
+    }
+
+    fn parseEclHeader(header_bytes: []const u8) EclHeader {
+        return .{
+            .a = std.mem.readInt(u16, header_bytes[2..4], .little),
+            .b = std.mem.readInt(u16, header_bytes[6..8], .little),
+            .c = std.mem.readInt(u16, header_bytes[10..12], .little),
+            .d = std.mem.readInt(u16, header_bytes[14..16], .little),
+            .first_command_address = std.mem.readInt(u16, header_bytes[18..20], .little),
+        };
     }
 
     fn addLabelAndTrackHighestAddress(self: *CommandParser, address: u16) !void {
@@ -389,18 +399,6 @@ pub const CommandParser = struct {
             .address = address,
         });
         return @intCast(fbs.pos - address);
-    }
-
-    pub fn parseEclHeader(self: *const CommandParser) EclHeader {
-        const header_bytes = self.genesis_memory[header_address..];
-
-        return .{
-            .a = std.mem.readInt(u16, header_bytes[2..4], .little),
-            .b = std.mem.readInt(u16, header_bytes[6..8], .little),
-            .c = std.mem.readInt(u16, header_bytes[10..12], .little),
-            .d = std.mem.readInt(u16, header_bytes[14..16], .little),
-            .first_command_address = std.mem.readInt(u16, header_bytes[18..20], .little),
-        };
     }
 
     const Arg = union(enum) {
