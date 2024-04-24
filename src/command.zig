@@ -30,7 +30,6 @@ const IndexSlice = struct {
 
 pub const CommandParser = struct {
     allocator: std.mem.Allocator,
-    genesis_memory: []const u8,
     script: []const u8,
     text: []const u8,
     commands: std.ArrayList(Command),
@@ -97,13 +96,10 @@ pub const CommandParser = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !CommandParser {
-        var genesis_memory = try allocator.alloc(u8, 64 * 1024);
-        errdefer allocator.free(genesis_memory);
-
-        const script_end = ecl_base + script_bytes.len;
-        const text_end = script_end + text_bytes.len;
-        @memcpy(genesis_memory[ecl_base..script_end], script_bytes);
-        @memcpy(genesis_memory[script_end..text_end], text_bytes);
+        const script = try allocator.dupe(u8, script_bytes);
+        errdefer allocator.free(script);
+        const text = try allocator.dupe(u8, text_bytes);
+        errdefer allocator.free(text);
 
         const commands = std.ArrayList(Command).init(allocator);
         const args = std.ArrayList(Arg).init(allocator);
@@ -115,9 +111,8 @@ pub const CommandParser = struct {
 
         return .{
             .allocator = allocator,
-            .genesis_memory = genesis_memory,
-            .script = genesis_memory[ecl_base..script_end],
-            .text = genesis_memory[script_end..text_end],
+            .script = script,
+            .text = text,
             .commands = commands,
             .args = args,
             .vars = vars,
@@ -129,7 +124,8 @@ pub const CommandParser = struct {
     }
 
     pub fn deinit(self: *CommandParser) void {
-        self.allocator.free(self.genesis_memory);
+        self.allocator.free(self.script);
+        self.allocator.free(self.text);
         self.commands.deinit();
         self.args.deinit();
         self.vars.deinit();
@@ -200,7 +196,7 @@ pub const CommandParser = struct {
     pub fn parseEcl(self: *CommandParser) !void {
         try self.readStrings(self.text);
 
-        const ecl_header = parseEclHeader(self.genesis_memory[ecl_base .. ecl_base + header_size]);
+        const ecl_header = parseEclHeader(self.script[0..header_size]);
 
         try self.addLabelAndTrackHighestAddress(ecl_header.a);
         try self.addLabelAndTrackHighestAddress(ecl_header.b);
@@ -315,8 +311,10 @@ pub const CommandParser = struct {
     };
 
     fn parseCommand(self: *CommandParser, address: u16) !u16 {
-        var fbs = std.io.fixedBufferStream(self.genesis_memory);
-        try fbs.seekTo(address);
+        std.debug.assert(address >= ecl_base and address < ecl_base + self.script.len);
+        const script_offset = address - ecl_base;
+
+        var fbs = std.io.fixedBufferStream(self.script[script_offset..]);
 
         const r = fbs.reader();
 
@@ -398,7 +396,7 @@ pub const CommandParser = struct {
             },
             .address = address,
         });
-        return @intCast(fbs.pos - address);
+        return @intCast(fbs.pos);
     }
 
     const Arg = union(enum) {
