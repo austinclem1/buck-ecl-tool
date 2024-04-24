@@ -71,14 +71,6 @@ pub fn main() !void {
 
         try parser.parseEcl();
 
-        try stderr.writer().print("\n", .{});
-        for (parser.strings.items) |s| {
-            try stderr.writer().print("str_{x}=\"{s}\"\n", .{ s.offset, s.bytes });
-            std.debug.assert(std.mem.indexOfScalar(u8, s.bytes, '"') == null);
-            std.debug.assert(std.mem.indexOfScalar(u8, s.bytes, '\n') == null);
-        }
-        try stderr.writer().print("\n", .{});
-
         parser.sortLabelsByAddress();
         parser.sortVarsByAddress();
 
@@ -109,7 +101,7 @@ pub fn main() !void {
             try stderr.writer().print("    {s}", .{@tagName(command.tag)});
             for (parser.getCommandArgs(command)) |arg| {
                 try stderr.writer().print(" ", .{});
-                try arg.writeString(stderr.writer());
+                try arg.writeString(parser.text, stderr.writer());
             }
             try stderr.writer().print("\n", .{});
         }

@@ -415,13 +415,16 @@ pub const CommandParser = struct {
         string: u16,
         mem_address: u16,
 
-        pub fn writeString(self: Arg, writer: anytype) !void {
+        pub fn writeString(self: Arg, text: []const u8, writer: anytype) !void {
             switch (self) {
                 .immediate => |val| try writer.print("{x}", .{val}),
                 .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
                 .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
                 .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
-                .string => |offset| try writer.print("str_{x}", .{offset}),
+                .string => |offset| {
+                    const c_str: [*:0]const u8 = @ptrCast(text[offset..]);
+                    try writer.print("\"{s}\"", .{c_str});
+                },
                 .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
             }
         }
