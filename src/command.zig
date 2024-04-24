@@ -493,12 +493,7 @@ pub const CommandParser = struct {
             .string => .{ .string = try reader.readInt(u16, .little) },
             .mem_address => .{ .mem_address = try reader.readInt(u16, .little) },
         };
-        switch (result) {
-            .string => |offset| {
-                try encountered_string_offsets.putNoClobber(offset, {});
-            },
-            else => {},
-        }
+
         return result;
     }
 };
