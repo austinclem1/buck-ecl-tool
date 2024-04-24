@@ -44,8 +44,15 @@ pub fn main() !void {
 
         try stderr.writer().print("decompressing script from {x}\n", .{compressed_script_addr});
         try rom_file.seekTo(compressed_script_addr);
+
         const script = try decoder.decompressAlloc(allocator, rom_file.reader());
         defer allocator.free(script);
+
+        // In the game, when the decompressed output length is odd, the returned length is rounded down.
+        // However, the final odd byte is still written into RAM. This matters with the script decompression
+        // because the following decompressed text section will be placed following the rounded down length
+        // of the script section, so we manually make this adjustment.
+        const adjusted_len_script = if (script.len % 2 == 1) script[0 .. script.len - 1] else script;
 
         decoder.resetRetainingCapacity();
 
@@ -54,12 +61,12 @@ pub fn main() !void {
         const text = try decoder.decompressAlloc(allocator, rom_file.reader());
         defer allocator.free(text);
 
-        const text_base: u16 = @intCast(ecl_base + script.len);
+        const text_base: u16 = @intCast(ecl_base + adjusted_len_script.len);
 
-        try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + script.len });
+        try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
-        var parser = try CommandParser.init(allocator, script, text);
+        var parser = try CommandParser.init(allocator, adjusted_len_script, text);
         defer parser.deinit();
 
         try parser.parseEcl();

@@ -127,14 +127,6 @@ pub fn decompressAlloc(self: *LzwDecoder, result_allocator: Allocator, reader: a
         last_code = code;
     }
 
-    // The decompression code in-game actually keeps this final byte, but then returns the
-    // length of the decompressed bytes NOT including this last odd byte
-    // Every example I've seen so far from ECL scripts and text just have a null byte as
-    // the last one if it happens to be an odd number of decompressed bytes
-    if (out_buffer.items.len % 2 == 1) {
-        _ = out_buffer.pop();
-    }
-
     return try out_buffer.toOwnedSlice();
 }
 
