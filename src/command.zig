@@ -37,7 +37,7 @@ pub const CommandParser = struct {
     vars: ArgMap,
     labels: AddressArraySet,
     strings: std.ArrayList(String),
-    initialized_bytes: ?[]const u8,
+    initialized_data: ?InitializedData,
     highest_known_command_address: u16,
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
@@ -49,6 +49,11 @@ pub const CommandParser = struct {
         byte,
         word,
         dword,
+    };
+
+    const InitializedData = struct {
+        address: u16,
+        bytes: []const u8,
     };
 
     const header_address = 0x6af6;
@@ -118,7 +123,7 @@ pub const CommandParser = struct {
             .vars = vars,
             .labels = labels,
             .strings = strings,
-            .initialized_bytes = null,
+            .initialized_data = null,
             .highest_known_command_address = 0,
         };
     }
@@ -237,7 +242,10 @@ pub const CommandParser = struct {
 
         const cur_script_offset = cur_addr - ecl_base;
         if (cur_script_offset < self.script.len) {
-            self.initialized_bytes = self.script[cur_script_offset..];
+            self.initialized_data = .{
+                .address = cur_addr,
+                .bytes = self.script[cur_script_offset..],
+            };
         }
     }
 
