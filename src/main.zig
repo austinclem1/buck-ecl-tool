@@ -22,6 +22,13 @@ pub fn main() !void {
     defer allocator.free(genesis_mem);
 
     for (level_ids) |level_id| {
+        // we skip 0x61 because there might be a bug in the game or this particular rom dump
+        // where an END code isn't found, so it just keeps decompressing subsequent data from later levels'
+        // text
+        // could be I'm missing some special way this particular level is loaded from a different function
+        // We can't just remove it from the list of level_ids because each id's index in the array is
+        // significant to finding the rom address of the compressed level data
+        if (level_id == 0x61) continue;
         std.debug.print("\n\n\nlevel id {x}\n", .{level_id});
 
         const rom_file = try std.fs.cwd().openFile("buck.md", .{});
@@ -97,11 +104,7 @@ pub fn main() !void {
     }
 }
 
-// level id 0x61 isn't here because there might be a bug in the game or this particular rom dump
-// where an END code isn't found, so it just keeps decompressing subsequent data from later levels'
-// text
-// could be I'm missing some special way this particular level is loaded from a different function
-const level_ids = [_]u8{ 0x00, 0x01, 0x03, 0x10, 0x11, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x34, 0x40, 0x41, 0x42, 0x43, 0x50, 0x51, 0x52, 0x53, 0x5e, 0x5f, 0x60, 0x62, 0x63 };
+const level_ids = [_]u8{ 0x00, 0x01, 0x03, 0x10, 0x11, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x34, 0x40, 0x41, 0x42, 0x43, 0x50, 0x51, 0x52, 0x53, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63 };
 const compressedScriptsTableAddr = 0x38d02;
 const compressedTextTableAddr = 0x42b2a;
 
