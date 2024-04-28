@@ -92,7 +92,7 @@ pub fn main() !void {
             try stderr.writer().print("    {s}", .{@tagName(command.tag)});
             for (parser.getCommandArgs(command)) |arg| {
                 try stderr.writer().print(" ", .{});
-                try arg.writeString(parser.text, stderr.writer());
+                try arg.writeString(&parser, stderr.writer());
             }
             try stderr.writer().print("\n", .{});
         }
