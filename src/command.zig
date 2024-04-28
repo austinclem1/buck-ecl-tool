@@ -349,19 +349,19 @@ pub const CommandParser = struct {
             .GOTO, .GOSUB => {},
             .ONGOTO, .ONGOSUB => {
                 // first 2 args could be vars, not any subsequent ones
-                try self.trackArgIfVar(args[0], null);
-                try self.trackArgIfVar(args[1], null);
+                try self.trackArgIfVar(args[0]);
+                try self.trackArgIfVar(args[1]);
             },
             else => {
                 for (args) |arg| {
-                    try self.trackArgIfVar(arg, null);
+                    try self.trackArgIfVar(arg);
                 }
             },
         }
     }
 
-    fn trackArgIfVar(self: *CommandParser, arg: Arg, explicit_var_size: ?Var.Size) !void {
-        const size = explicit_var_size orelse arg.maybeGetVarSize() orelse return;
+    fn trackArgIfVar(self: *CommandParser, arg: Arg) !void {
+        const size = arg.maybeGetVarSize() orelse return;
         const address = try arg.getAddress();
         const key = VarMap.Key{ .address = address, .size = size };
         if (!self.vars.contains(key)) {
