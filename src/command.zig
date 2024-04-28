@@ -100,7 +100,7 @@ pub const CommandParser = struct {
         }
 
         pub fn put(self: *VarMap, key: Key, name: []const u8) !void {
-            const duped_name = try self.names_arena.dupe(name);
+            const duped_name = try self.names_arena.allocator().dupe(u8, name);
             try self.map.put(key, duped_name);
         }
 
