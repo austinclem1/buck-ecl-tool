@@ -90,9 +90,19 @@ pub fn main() !void {
                 }
             }
             try stderr.writer().print("    {s}", .{@tagName(command.tag)});
-            for (parser.getCommandArgs(command)) |arg| {
+            for (parser.getCommandArgs(command), 0..) |arg, arg_i| {
                 try stderr.writer().print(" ", .{});
-                try arg.writeString(&parser, stderr.writer());
+                switch (command.tag) {
+                    .GOTO, .GOSUB => try stderr.writer().print("LABEL_{x}", .{arg.indirect1}),
+                    .ONGOTO, .ONGOSUB => {
+                        if (arg_i >= 2) {
+                            try stderr.writer().print("LABEL_{x}", .{arg.indirect1});
+                        } else {
+                            try arg.writeString(&parser, stderr.writer());
+                        }
+                    },
+                    else => try arg.writeString(&parser, stderr.writer()),
+                }
             }
             try stderr.writer().print("\n", .{});
         }
