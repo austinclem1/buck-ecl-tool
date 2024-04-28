@@ -125,6 +125,7 @@ pub const CommandParser = struct {
             .{ .address = 0x97dc, .size = .byte, .name = "combat_region" },
             .{ .address = 0x97e8, .size = .byte, .name = "last_active_level" },
             .{ .address = 0x97f8, .size = .byte, .name = "wall_type" },
+            .{ .address = 0x9876, .size = .byte, .name = "have_mariposa_code" },
             .{ .address = 0x98ec, .size = .byte, .name = "for_loop_i" },
             .{ .address = 0x9af6, .size = .byte, .name = "player_y" },
             .{ .address = 0x9af6, .size = .byte, .name = "player_y" },
