@@ -76,18 +76,6 @@ pub const CommandParser = struct {
         }
     }
 
-    pub fn sortVarsByAddress(self: *CommandParser) void {
-        const C = struct {
-            keys: []u16,
-
-            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-                return ctx.keys[a_index] < ctx.keys[b_index];
-            }
-        };
-
-        self.vars.sort(C{ .keys = self.vars.keys() });
-    }
-
     pub fn sortLabelsByAddress(self: *CommandParser) void {
         const C = struct {
             keys: []u16,
@@ -164,29 +152,6 @@ pub const CommandParser = struct {
                 .offset = @intCast(i),
             });
             i += slice.len + 1;
-        }
-    }
-
-    // variables must be sorted by address for this to work
-    pub fn detectVariableAliasing(self: *const CommandParser) void {
-        var it = self.vars.iterator();
-
-        var prev_var = it.next() orelse return;
-
-        while (it.next()) |cur_var| : (prev_var = cur_var) {
-            const prev_address = prev_var.key_ptr.*;
-            const prev_size: u16 = switch (prev_var.value_ptr.*) {
-                .byte => 1,
-                .word => 2,
-                .dword => 4,
-            };
-
-            const cur_address = cur_var.key_ptr.*;
-
-            if (cur_address < prev_address + prev_size) {
-                std.debug.print("alias detected: {x}: {s}, {x}: {s}\n", .{ prev_address, @tagName(prev_var.value_ptr.*), cur_address, @tagName(cur_var.value_ptr.*) });
-                // return error.VariablesAlias;
-            }
         }
     }
 

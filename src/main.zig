@@ -72,7 +72,6 @@ pub fn main() !void {
         try parser.parseEcl();
 
         parser.sortLabelsByAddress();
-        parser.sortVarsByAddress();
 
         try parser.ensureStringArgsAccountedFor();
         if (parser.initialized_data) |data| {
@@ -80,14 +79,6 @@ pub fn main() !void {
             try stderr.writer().print("\ninitialized bytes {x}-{x}\n", .{ data.address, end_address });
             try stderr.writer().print("{s}\n\n", .{std.fmt.fmtSliceHexLower(data.bytes)});
         }
-
-        var it = parser.vars.iterator();
-        while (it.next()) |e| {
-            try stderr.writer().print("{s} {x}\n", .{ @tagName(e.value_ptr.*), e.key_ptr.* });
-        }
-        try stderr.writer().print("\n", .{});
-
-        parser.detectVariableAliasing();
 
         var labels_it = parser.labels.iterator();
         var next_label = labels_it.next();
