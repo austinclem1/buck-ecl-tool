@@ -243,17 +243,6 @@ pub const CommandParser = struct {
         offset: u16,
     };
 
-    const CommandBlock = struct {
-        start_addr: u16,
-        end_addr: u16,
-        commands: IndexSlice,
-
-        pub fn lessThan(context: void, a: CommandBlock, b: CommandBlock) bool {
-            _ = context;
-            return a.start_addr < b.start_addr;
-        }
-    };
-
     pub fn readStrings(self: *CommandParser, text: []const u8) !void {
         var i: usize = 0;
         while (i < text.len) {
@@ -264,10 +253,6 @@ pub const CommandParser = struct {
             });
             i += slice.len + 1;
         }
-    }
-
-    pub fn getBlockCommands(self: *const CommandParser, block: CommandBlock) []Command {
-        return self.commands.items[block.commands.start..block.commands.stop];
     }
 
     pub fn getCommandArgs(self: *const CommandParser, cmd: Command) []Arg {
