@@ -21,15 +21,6 @@ const ecl_scratch_space_end = 0x9e79;
 // selected_character_status 9bf6 (maybe unused in sega version?)
 // 10 bytes scratch_space 9e6f-9e79
 
-const IndexSlice = struct {
-    start: u16,
-    stop: u16,
-
-    fn getLen(s: IndexSlice) u16 {
-        return s.stop - s.start;
-    }
-};
-
 pub const CommandParser = struct {
     allocator: std.mem.Allocator,
     script: []const u8,
@@ -256,7 +247,9 @@ pub const CommandParser = struct {
     }
 
     pub fn getCommandArgs(self: *const CommandParser, cmd: Command) []Arg {
-        return self.args.items[cmd.args.start..cmd.args.stop];
+        const start = cmd.first_arg_index;
+        const stop = start + cmd.arg_count;
+        return self.args.items[start..stop];
     }
 
     pub fn parseEcl(self: *CommandParser) !void {
@@ -485,10 +478,8 @@ pub const CommandParser = struct {
 
         try self.commands.append(Command{
             .tag = tag,
-            .args = IndexSlice{
-                .start = @intCast(first_arg_index),
-                .stop = @intCast(self.args.items.len),
-            },
+            .first_arg_index = first_arg_index,
+            .arg_count = self.args.items.len - first_arg_index,
             .address = address,
         });
         return @intCast(fbs.pos);
@@ -629,7 +620,8 @@ const EclHeader = struct {
 
 pub const Command = struct {
     tag: Tag,
-    args: IndexSlice,
+    first_arg_index: usize,
+    arg_count: usize,
     address: u16,
 
     const Tag = enum(u8) {
