@@ -35,7 +35,6 @@ pub const CommandParser = struct {
 
     const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
     const AddressArraySet = std.AutoArrayHashMap(u16, void);
-    const AddressSet = std.AutoHashMap(u16, void);
 
     const Var = struct {
         address: u16,
