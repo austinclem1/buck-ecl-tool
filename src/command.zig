@@ -29,7 +29,7 @@ pub const CommandParser = struct {
     vars: VarMap,
     initialized_data_references: std.ArrayList(u16),
     initialized_data_segments: std.ArrayList(InitializedDataSegment),
-    labels: AddressArraySet,
+    labels: std.AutoArrayHashMap(u16, void),
     strings: std.ArrayList(String),
     highest_known_command_address: u16,
 
@@ -154,18 +154,6 @@ pub const CommandParser = struct {
         }
     }
 
-    pub fn sortLabelsByAddress(self: *CommandParser) void {
-        const C = struct {
-            keys: []u16,
-
-            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-                return ctx.keys[a_index] < ctx.keys[b_index];
-            }
-        };
-
-        self.labels.sort(C{ .keys = self.labels.keys() });
-    }
-
     pub fn init(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !CommandParser {
         const script = try allocator.dupe(u8, script_bytes);
         errdefer allocator.free(script);
@@ -187,7 +175,7 @@ pub const CommandParser = struct {
         const initialized_data_segments = std.ArrayList(InitializedDataSegment).init(allocator);
         errdefer initialized_data_segments.deinit();
 
-        const labels = AddressArraySet.init(allocator);
+        const labels = std.AutoArrayHashMap(u16, void).init(allocator);
         errdefer labels.deinit();
 
         const strings = std.ArrayList(String).init(allocator);
@@ -284,6 +272,15 @@ pub const CommandParser = struct {
                 },
             }
         }
+
+        const AddressAscendingSortContext = struct {
+            addresses: []u16,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.addresses[a_index] < ctx.addresses[b_index];
+            }
+        };
+        self.labels.sort(AddressAscendingSortContext{ .addresses = self.labels.keys() });
 
         try self.initialized_data_references.append(@intCast(ecl_base + self.script.len));
         std.sort.insertion(u16, self.initialized_data_references.items, {}, std.sort.asc(u16));

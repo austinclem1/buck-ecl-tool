@@ -71,8 +71,6 @@ pub fn main() !void {
 
         try parser.parseEcl();
 
-        parser.sortLabelsByAddress();
-
         try parser.ensureStringArgsAccountedFor();
 
         var labels_it = parser.labels.iterator();
