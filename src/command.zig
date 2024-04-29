@@ -33,9 +33,6 @@ pub const CommandParser = struct {
     strings: std.ArrayList(String),
     highest_known_command_address: u16,
 
-    const BranchQueue = std.fifo.LinearFifo(u16, .Dynamic);
-    const AddressArraySet = std.AutoArrayHashMap(u16, void);
-
     const Var = struct {
         address: u16,
         size: Size,
