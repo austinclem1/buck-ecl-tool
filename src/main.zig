@@ -74,11 +74,6 @@ pub fn main() !void {
         parser.sortLabelsByAddress();
 
         try parser.ensureStringArgsAccountedFor();
-        if (parser.initialized_data) |data| {
-            const end_address = data.address + data.bytes.len;
-            try stderr.writer().print("\ninitialized bytes {x}-{x}\n", .{ data.address, end_address });
-            try stderr.writer().print("{s}\n\n", .{std.fmt.fmtSliceHexLower(data.bytes)});
-        }
 
         var labels_it = parser.labels.iterator();
         var next_label = labels_it.next();
@@ -105,6 +100,10 @@ pub fn main() !void {
                 }
             }
             try stderr.writer().print("\n", .{});
+        }
+        for (parser.initialized_data_segments.items) |segment| {
+            try stderr.writer().print("{s}:\n", .{segment.name});
+            try stderr.writer().print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
         }
     }
 
