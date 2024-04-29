@@ -2,7 +2,6 @@ const std = @import("std");
 
 const ecl_base = 0x6af6;
 const header_size = 20;
-var encountered_string_offsets: std.AutoHashMap(u16, void) = undefined;
 const ecl_scratch_space_start = 0x9e6f;
 const ecl_scratch_space_end = 0x9e79;
 
@@ -198,9 +197,6 @@ pub const CommandParser = struct {
         const strings = std.ArrayList(String).init(allocator);
         errdefer strings.deinit();
 
-        encountered_string_offsets = std.AutoHashMap(u16, void).init(allocator);
-        errdefer encountered_string_offsets.deinit();
-
         return .{
             .allocator = allocator,
             .script = script,
@@ -226,7 +222,6 @@ pub const CommandParser = struct {
         self.initialized_data_segments.deinit();
         self.labels.deinit();
         self.strings.deinit();
-        encountered_string_offsets.deinit();
     }
 
     const String = struct {
