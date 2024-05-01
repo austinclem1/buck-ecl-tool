@@ -83,7 +83,7 @@ pub fn main() !void {
         for (parser.commands.items) |command| {
             if (next_label) |label| {
                 if (command.address == label.key_ptr.*) {
-                    try stderr.writer().print("LABEL_{x}:\n", .{label.key_ptr.*});
+                    try stderr.writer().print("LABEL_{d}:\n", .{labels_it.index - 1});
                     next_label = labels_it.next();
                 }
             }
