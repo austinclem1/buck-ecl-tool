@@ -29,7 +29,7 @@ pub const CommandParser = struct {
     vars: VarMap,
     initialized_data_references: std.ArrayList(u16),
     initialized_data_segments: std.ArrayList(InitializedDataSegment),
-    labels: std.AutoArrayHashMap(u16, void),
+    jump_dests: std.AutoArrayHashMap(u16, void),
     strings: std.ArrayList(String),
     highest_known_command_address: u16,
 
@@ -175,8 +175,8 @@ pub const CommandParser = struct {
         const initialized_data_segments = std.ArrayList(InitializedDataSegment).init(allocator);
         errdefer initialized_data_segments.deinit();
 
-        const labels = std.AutoArrayHashMap(u16, void).init(allocator);
-        errdefer labels.deinit();
+        const jump_dests = std.AutoArrayHashMap(u16, void).init(allocator);
+        errdefer jump_dests.deinit();
 
         const strings = std.ArrayList(String).init(allocator);
         errdefer strings.deinit();
@@ -190,7 +190,7 @@ pub const CommandParser = struct {
             .vars = vars,
             .initialized_data_references = initialized_data_references,
             .initialized_data_segments = initialized_data_segments,
-            .labels = labels,
+            .jump_dests = jump_dests,
             .strings = strings,
             .highest_known_command_address = 0,
         };
@@ -204,7 +204,7 @@ pub const CommandParser = struct {
         self.vars.deinit();
         self.initialized_data_references.deinit();
         self.initialized_data_segments.deinit();
-        self.labels.deinit();
+        self.jump_dests.deinit();
         self.strings.deinit();
     }
 
@@ -236,11 +236,12 @@ pub const CommandParser = struct {
 
         const ecl_header = parseEclHeader(self.script[0..header_size]);
 
-        try self.addLabelAndTrackHighestAddress(ecl_header.a);
-        try self.addLabelAndTrackHighestAddress(ecl_header.b);
-        try self.addLabelAndTrackHighestAddress(ecl_header.c);
-        try self.addLabelAndTrackHighestAddress(ecl_header.d);
-        try self.addLabelAndTrackHighestAddress(ecl_header.first_command_address);
+        self.highest_known_command_address = @max(ecl_header.a, ecl_header.b, ecl_header.c, ecl_header.d, ecl_header.first_command_address);
+        try self.jump_dests.put(ecl_header.a, {});
+        try self.jump_dests.put(ecl_header.b, {});
+        try self.jump_dests.put(ecl_header.c, {});
+        try self.jump_dests.put(ecl_header.d, {});
+        try self.jump_dests.put(ecl_header.first_command_address, {});
 
         var cur_addr: u16 = ecl_base + header_size;
         while (cur_addr <= self.highest_known_command_address) {
@@ -248,7 +249,7 @@ pub const CommandParser = struct {
             const cmd_size = try self.parseCommand(cur_addr);
 
             const cmd = self.commands.getLast();
-            try self.trackCommandLabels(cmd);
+            try self.trackCommandJumpDests(cmd);
             try self.trackCommandVars(cmd);
 
             switch (cmd.tag.getFlowType()) {
@@ -261,7 +262,7 @@ pub const CommandParser = struct {
                     const next_cmd_size = try self.parseCommand(next_cmd_address);
 
                     const next_cmd = self.commands.getLast();
-                    try self.trackCommandLabels(next_cmd);
+                    try self.trackCommandJumpDests(next_cmd);
                     try self.trackCommandVars(next_cmd);
 
                     cur_addr = next_cmd_address + next_cmd_size;
@@ -280,7 +281,12 @@ pub const CommandParser = struct {
                 return ctx.addresses[a_index] < ctx.addresses[b_index];
             }
         };
-        self.labels.sort(AddressAscendingSortContext{ .addresses = self.labels.keys() });
+        self.jump_dests.sort(AddressAscendingSortContext{ .addresses = self.jump_dests.keys() });
+        for (self.jump_dests.keys(), 0..) |address, i| {
+            var buf: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&buf, "LABEL_{d}", .{i});
+            try self.vars.put(VarMap.Key{ .address = address, .size = .byte }, name);
+        }
 
         try self.initialized_data_references.append(@intCast(ecl_base + self.script.len));
         std.sort.insertion(u16, self.initialized_data_references.items, {}, std.sort.asc(u16));
@@ -316,24 +322,21 @@ pub const CommandParser = struct {
         };
     }
 
-    fn addLabelAndTrackHighestAddress(self: *CommandParser, address: u16) !void {
-        self.highest_known_command_address = @max(address, self.highest_known_command_address);
-        try self.labels.put(address, {});
-    }
-
-    fn trackCommandLabels(self: *CommandParser, command: Command) !void {
+    fn trackCommandJumpDests(self: *CommandParser, command: Command) !void {
         const args = self.getCommandArgs(command);
 
         switch (command.tag) {
             .ONGOTO, .ONGOSUB => {
                 for (args[2..]) |arg| {
                     const address = try arg.getAddress();
-                    try self.addLabelAndTrackHighestAddress(address);
+                    self.highest_known_command_address = @max(address, self.highest_known_command_address);
+                    try self.jump_dests.put(address, {});
                 }
             },
             .GOTO, .GOSUB => {
                 const address = try args[0].getAddress();
-                try self.addLabelAndTrackHighestAddress(address);
+                self.highest_known_command_address = @max(address, self.highest_known_command_address);
+                try self.jump_dests.put(address, {});
             },
             else => {},
         }
@@ -481,45 +484,6 @@ pub const CommandParser = struct {
         string: u16,
         mem_address: u16,
 
-        pub fn writeString(self: Arg, parser: *const CommandParser, writer: anytype) !void {
-            switch (self) {
-                .indirect1 => |addr| {
-                    const key = VarMap.Key{ .address = addr, .size = .byte };
-                    if (parser.vars.get(key)) |name| {
-                        try writer.print("{s}", .{name});
-                        return;
-                    }
-                },
-                .indirect2 => |addr| {
-                    const key = VarMap.Key{ .address = addr, .size = .word };
-                    if (parser.vars.get(key)) |name| {
-                        try writer.print("{s}", .{name});
-                        return;
-                    }
-                },
-                .indirect4 => |addr| {
-                    const key = VarMap.Key{ .address = addr, .size = .dword };
-                    if (parser.vars.get(key)) |name| {
-                        try writer.print("{s}", .{name});
-                        return;
-                    }
-                },
-                else => {},
-            }
-
-            switch (self) {
-                .immediate => |val| try writer.print("{x}", .{val}),
-                .indirect1 => |addr| try writer.print("b@{x}", .{addr}),
-                .indirect2 => |addr| try writer.print("w@{x}", .{addr}),
-                .indirect4 => |addr| try writer.print("d@{x}", .{addr}),
-                .string => |offset| {
-                    const c_str: [*:0]const u8 = @ptrCast(parser.text[offset..]);
-                    try writer.print("\"{s}\"", .{c_str});
-                },
-                .mem_address => |addr| try writer.print("mem[{x}]", .{addr}),
-            }
-        }
-
         fn getScalar(arg: Arg) !u32 {
             return switch (arg) {
                 .immediate => |val| val,
@@ -595,6 +559,37 @@ pub const CommandParser = struct {
         };
 
         return result;
+    }
+
+    pub fn writeCommandString(self: *const CommandParser, command: Command, writer: anytype) !void {
+        try writer.writeAll(@tagName(command.tag));
+
+        for (self.getCommandArgs(command)) |arg| {
+            try writer.writeByte(' ');
+            switch (arg) {
+                .immediate => |val| try writer.print("{x}", .{val}),
+                .indirect1 => |address| {
+                    const key = VarMap.Key{ .address = address, .size = .byte };
+                    const name = self.vars.get(key).?;
+                    try writer.writeAll(name);
+                },
+                .indirect2 => |address| {
+                    const key = VarMap.Key{ .address = address, .size = .word };
+                    const name = self.vars.get(key).?;
+                    try writer.writeAll(name);
+                },
+                .indirect4 => |address| {
+                    const key = VarMap.Key{ .address = address, .size = .dword };
+                    const name = self.vars.get(key).?;
+                    try writer.writeAll(name);
+                },
+                .string => |offset| {
+                    const string: [*:0]const u8 = @ptrCast(self.text[offset..]);
+                    try writer.print("\"{s}\"", .{string});
+                },
+                .mem_address => |address| try writer.print("mem[{x}]", .{address}),
+            }
+        }
     }
 };
 

@@ -69,11 +69,16 @@ pub fn main() !void {
         var parser = try CommandParser.init(allocator, adjusted_len_script, text);
         defer parser.deinit();
 
+        var i: usize = 0;
+        while (i < 20) : (i += 4) {
+            try stderr.writer().print("{x}\n", .{std.fmt.fmtSliceHexLower(script[i .. i + 4])});
+        }
+
         try parser.parseEcl();
 
         try parser.ensureStringArgsAccountedFor();
 
-        var labels_it = parser.labels.iterator();
+        var labels_it = parser.jump_dests.iterator();
         var next_label = labels_it.next();
         for (parser.commands.items) |command| {
             if (next_label) |label| {
@@ -82,21 +87,8 @@ pub fn main() !void {
                     next_label = labels_it.next();
                 }
             }
-            try stderr.writer().print("    {s}", .{@tagName(command.tag)});
-            for (parser.getCommandArgs(command), 0..) |arg, arg_i| {
-                try stderr.writer().print(" ", .{});
-                switch (command.tag) {
-                    .GOTO, .GOSUB => try stderr.writer().print("LABEL_{x}", .{arg.indirect1}),
-                    .ONGOTO, .ONGOSUB => {
-                        if (arg_i >= 2) {
-                            try stderr.writer().print("LABEL_{x}", .{arg.indirect1});
-                        } else {
-                            try arg.writeString(&parser, stderr.writer());
-                        }
-                    },
-                    else => try arg.writeString(&parser, stderr.writer()),
-                }
-            }
+            try stderr.writer().writeAll("\t");
+            try parser.writeCommandString(command, stderr.writer());
             try stderr.writer().print("\n", .{});
         }
         for (parser.initialized_data_segments.items) |segment| {
