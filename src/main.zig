@@ -2,7 +2,7 @@ const std = @import("std");
 
 const File = std.fs.File;
 
-const CommandParser = @import("command.zig").CommandParser;
+const command = @import("command.zig");
 const LzwDecoder = @import("LzwDecoder.zig");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
@@ -66,32 +66,52 @@ pub fn main() !void {
         try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
-        var parser = try CommandParser.init(allocator, adjusted_len_script, text);
-        defer parser.deinit();
+        var parsed_ecl = try command.parseEclBinaryAlloc(allocator, adjusted_len_script, text);
+        defer command.freeEclBinaryParseResult(allocator, &parsed_ecl);
 
-        var i: usize = 0;
-        while (i < 20) : (i += 4) {
-            try stderr.writer().print("{x}\n", .{std.fmt.fmtSliceHexLower(script[i .. i + 4])});
+        try stderr.writer().print("header:\n", .{});
+        for (parsed_ecl.header) |address| {
+            try stderr.writer().print("\t{x:0>4}\n", .{address});
         }
 
-        try parser.parseEcl();
-
-        try parser.ensureStringArgsAccountedFor();
-
-        var labels_it = parser.jump_dests.iterator();
-        var next_label = labels_it.next();
-        for (parser.commands.items) |command| {
-            if (next_label) |label| {
-                if (command.address == label.key_ptr.*) {
-                    try stderr.writer().print("LABEL_{d}:\n", .{labels_it.index - 1});
-                    next_label = labels_it.next();
+        for (parsed_ecl.blocks) |block| {
+            const label = parsed_ecl.var_map.get(.{
+                .address = block.address,
+                .size = .byte,
+            }).?;
+            try stderr.writer().print("{s}:\n", .{label});
+            for (parsed_ecl.getBlockCommands(block)) |cmd| {
+                try stderr.writer().print("\t{s}", .{@tagName(cmd.tag)});
+                for (parsed_ecl.getCommandArgs(cmd)) |arg| {
+                    switch (arg) {
+                        .immediate => |val| {
+                            try stderr.writer().print(" {x}", .{val});
+                        },
+                        .byte_var => |address| {
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .byte }).?;
+                            try stderr.writer().print(" {s}", .{name});
+                        },
+                        .word_var => |address| {
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .word }).?;
+                            try stderr.writer().print(" {s}", .{name});
+                        },
+                        .dword_var => |address| {
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .dword }).?;
+                            try stderr.writer().print(" {s}", .{name});
+                        },
+                        .string => |offset| {
+                            const s: [*:0]const u8 = @ptrCast(parsed_ecl.text_bytes[offset..]);
+                            try stderr.writer().print(" \"{s}\"", .{s});
+                        },
+                        .mem_address => |address| {
+                            try stderr.writer().print(" mem[{x:0>4}]", .{address});
+                        },
+                    }
                 }
+                try stderr.writer().writeByte('\n');
             }
-            try stderr.writer().writeAll("\t");
-            try parser.writeCommandString(command, stderr.writer());
-            try stderr.writer().print("\n", .{});
         }
-        for (parser.initialized_data_segments.items) |segment| {
+        for (parsed_ecl.init_data_segments) |segment| {
             try stderr.writer().print("{s}:\n", .{segment.name});
             try stderr.writer().print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
         }
