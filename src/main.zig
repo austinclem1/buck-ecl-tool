@@ -2,7 +2,7 @@ const std = @import("std");
 
 const File = std.fs.File;
 
-const command = @import("command.zig");
+const ecl = @import("ecl.zig");
 const LzwDecoder = @import("LzwDecoder.zig");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
@@ -66,8 +66,8 @@ pub fn main() !void {
         try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
-        var parsed_ecl = try command.parseEclBinaryAlloc(allocator, adjusted_len_script, text);
-        defer command.freeEclBinaryParseResult(allocator, &parsed_ecl);
+        var parsed_ecl = try ecl.parseEclBinaryAlloc(allocator, adjusted_len_script, text);
+        defer ecl.freeEclBinaryParseResult(allocator, &parsed_ecl);
 
         try stderr.writer().print("header:\n", .{});
         for (parsed_ecl.header) |address| {
