@@ -123,10 +123,11 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             else => args.items[args_start_index..],
         };
         for (possible_vars) |arg| {
-            const address, const size = switch (arg) {
-                .byte_var => |addr| .{ addr, VarSize.byte },
-                .word_var => |addr| .{ addr, VarSize.word },
-                .dword_var => |addr| .{ addr, VarSize.dword },
+            const address, const var_type = switch (arg) {
+                .byte_var => |addr| .{ addr, Var.Type.byte },
+                .word_var => |addr| .{ addr, Var.Type.word },
+                .dword_var => |addr| .{ addr, Var.Type.dword },
+                .mem_address => |addr| .{ addr, Var.Type.pointer },
                 else => continue,
             };
             if (address >= ecl_base and address < script_bytes.len + ecl_base) {
@@ -135,7 +136,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             }
             const gop = try var_map.getOrPut(allocator, VarMapKey{
                 .address = address,
-                .size = size,
+                .type = var_type,
             });
             if (gop.found_existing) continue;
             if (address >= scratch_start_address and address < scratch_end_address) {
@@ -143,14 +144,14 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 const var_name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
                     "scratch[{d}]{c}",
-                    .{ offset, size.getLetter() },
+                    .{ offset, var_type.getLetter() },
                 );
                 gop.value_ptr.* = var_name;
             } else {
                 const var_name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
                     "{c}var_{x:0>4}",
-                    .{ size.getLetter(), address },
+                    .{ var_type.getLetter(), address },
                 );
                 gop.value_ptr.* = var_name;
             }
@@ -191,7 +192,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             .{i},
         );
         var_map.putAssumeCapacityNoClobber(
-            .{ .address = address, .size = .byte },
+            .{ .address = address, .type = .byte },
             label,
         );
     }
@@ -250,7 +251,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         );
         try var_map.putNoClobber(
             allocator,
-            VarMapKey{ .address = start_address, .size = .byte },
+            VarMapKey{ .address = start_address, .type = .byte },
             name,
         );
 
@@ -575,29 +576,31 @@ fn readArg(reader: anytype) !Arg {
 
 const Var = struct {
     address: u16,
-    size: VarSize,
+    type: Type,
     name: []const u8,
+
+    const Type = enum {
+        byte,
+        word,
+        dword,
+        pointer,
+
+        fn getLetter(self: Type) u8 {
+            return switch (self) {
+                .byte => 'b',
+                .word => 'w',
+                .dword => 'd',
+                .pointer => 'p',
+            };
+        }
+    };
 };
 
 const VarMap = std.AutoHashMapUnmanaged(VarMapKey, []const u8);
 
 pub const VarMapKey = struct {
     address: u16,
-    size: VarSize,
-};
-
-const VarSize = enum {
-    byte,
-    word,
-    dword,
-
-    fn getLetter(self: VarSize) u8 {
-        return switch (self) {
-            .byte => 'b',
-            .word => 'w',
-            .dword => 'd',
-        };
-    }
+    type: Var.Type,
 };
 
 const InitializedDataSegment = struct {

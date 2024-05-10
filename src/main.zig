@@ -77,7 +77,7 @@ pub fn main() !void {
         for (parsed_ecl.blocks) |block| {
             const label = parsed_ecl.var_map.get(.{
                 .address = block.address,
-                .size = .byte,
+                .type = .byte,
             }).?;
             try stderr.writer().print("{s}:\n", .{label});
             for (parsed_ecl.getBlockCommands(block)) |cmd| {
@@ -88,15 +88,15 @@ pub fn main() !void {
                             try stderr.writer().print(" {x}", .{val});
                         },
                         .byte_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .byte }).?;
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .byte }).?;
                             try stderr.writer().print(" {s}", .{name});
                         },
                         .word_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .word }).?;
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .word }).?;
                             try stderr.writer().print(" {s}", .{name});
                         },
                         .dword_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .size = .dword }).?;
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .dword }).?;
                             try stderr.writer().print(" {s}", .{name});
                         },
                         .string => |offset| {
@@ -104,7 +104,8 @@ pub fn main() !void {
                             try stderr.writer().print(" \"{s}\"", .{s});
                         },
                         .mem_address => |address| {
-                            try stderr.writer().print(" mem[{x:0>4}]", .{address});
+                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .pointer }).?;
+                            try stderr.writer().print(" {s}", .{name});
                         },
                     }
                 }
