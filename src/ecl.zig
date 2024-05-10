@@ -46,7 +46,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
     var bytes_arena = std.heap.ArenaAllocator.init(allocator);
     errdefer bytes_arena.deinit();
 
-    var var_map = std.AutoHashMapUnmanaged(VarMapKey, []const u8){};
+    var var_map = VarMap{};
     errdefer var_map.deinit(allocator);
 
     var commands = std.ArrayListUnmanaged(Command){};
@@ -573,6 +573,19 @@ fn readArg(reader: anytype) !Arg {
     return result;
 }
 
+const Var = struct {
+    address: u16,
+    size: VarSize,
+    name: []const u8,
+};
+
+const VarMap = std.AutoHashMapUnmanaged(VarMapKey, []const u8);
+
+pub const VarMapKey = struct {
+    address: u16,
+    size: VarSize,
+};
+
 const VarSize = enum {
     byte,
     word,
@@ -585,11 +598,6 @@ const VarSize = enum {
             .dword => 'd',
         };
     }
-};
-
-const VarMapKey = struct {
-    address: u16,
-    size: VarSize,
 };
 
 const InitializedDataSegment = struct {
