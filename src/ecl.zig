@@ -141,17 +141,29 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             if (gop.found_existing) continue;
             if (address >= scratch_start_address and address < scratch_end_address) {
                 const offset = address - scratch_start_address;
+                const size_letter: u8 = switch (var_type) {
+                    .byte => 'b',
+                    .word => 'w',
+                    .dword => 'd',
+                    .pointer => std.debug.panic("Encountered pointer to scratch space\n", .{}),
+                };
                 const var_name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
                     "scratch[{d}]{c}",
-                    .{ offset, var_type.getLetter() },
+                    .{ offset, size_letter },
                 );
                 gop.value_ptr.* = var_name;
             } else {
+                const prefix = switch (var_type) {
+                    .byte => "bvar",
+                    .word => "wvar",
+                    .dword => "dvar",
+                    .pointer => "ptr",
+                };
                 const var_name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
-                    "{c}var_{x:0>4}",
-                    .{ var_type.getLetter(), address },
+                    "{s}_{x:0>4}",
+                    .{ prefix, address },
                 );
                 gop.value_ptr.* = var_name;
             }
@@ -584,15 +596,6 @@ const Var = struct {
         word,
         dword,
         pointer,
-
-        fn getLetter(self: Type) u8 {
-            return switch (self) {
-                .byte => 'b',
-                .word => 'w',
-                .dword => 'd',
-                .pointer => 'p',
-            };
-        }
     };
 };
 
