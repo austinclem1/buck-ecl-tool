@@ -71,7 +71,11 @@ pub fn main() !void {
 
         try stderr.writer().print("header:\n", .{});
         for (parsed_ecl.header) |address| {
-            try stderr.writer().print("\t{x:0>4}\n", .{address});
+            const label = parsed_ecl.var_map.get(.{
+                .address = address,
+                .type = .byte,
+            }).?;
+            try stderr.writer().print("\t{s}\n", .{label});
         }
 
         for (parsed_ecl.blocks) |block| {
