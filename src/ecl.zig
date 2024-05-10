@@ -2,8 +2,8 @@ const std = @import("std");
 
 const ecl_base = 0x6af6;
 const header_size = 20;
-const ecl_scratch_space_start = 0x9e6f;
-const ecl_scratch_space_end = 0x9e79;
+const scratch_start_address = 0x9e6f;
+const scratch_end_address = 0x9e79;
 
 // game globals
 // maybe window graphic to show 979b
@@ -124,31 +124,37 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             else => args.items[args_start_index..],
         };
         for (possible_vars) |arg| {
-            const address = switch (arg) {
-                .byte_var, .word_var, .dword_var => |a| a,
+            const address, const size = switch (arg) {
+                .byte_var => |addr| .{ addr, VarSize.byte },
+                .word_var => |addr| .{ addr, VarSize.word },
+                .dword_var => |addr| .{ addr, VarSize.dword },
                 else => continue,
             };
             if (address >= ecl_base and address < script_bytes.len + ecl_base) {
                 try init_data_refs.put(allocator, address, {});
                 continue;
             }
-            const size: VarSize = switch (arg) {
-                .byte_var => .byte,
-                .word_var => .word,
-                .dword_var => .dword,
-                else => unreachable,
-            };
             const gop = try var_map.getOrPut(allocator, VarMapKey{
                 .address = address,
                 .size = size,
             });
             if (gop.found_existing) continue;
-            const var_name = try std.fmt.allocPrint(
-                bytes_arena.allocator(),
-                "{c}var_{x:0>4}",
-                .{ size.getLetter(), address },
-            );
-            gop.value_ptr.* = var_name;
+            if (address >= scratch_start_address and address < scratch_end_address) {
+                const offset = address - scratch_start_address;
+                const var_name = try std.fmt.allocPrint(
+                    bytes_arena.allocator(),
+                    "scratch[{d}]{c}",
+                    .{ offset, size.getLetter() },
+                );
+                gop.value_ptr.* = var_name;
+            } else {
+                const var_name = try std.fmt.allocPrint(
+                    bytes_arena.allocator(),
+                    "{c}var_{x:0>4}",
+                    .{ size.getLetter(), address },
+                );
+                gop.value_ptr.* = var_name;
+            }
         }
 
         try commands.append(allocator, Command{
