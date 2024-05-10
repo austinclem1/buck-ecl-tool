@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const ecl_base = 0x6af6;
-const header_size = 20;
 const scratch_start_address = 0x9e6f;
 const scratch_end_address = 0x9e79;
 
