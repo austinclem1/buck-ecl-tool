@@ -69,57 +69,7 @@ pub fn main() !void {
         var parsed_ecl = try ecl.parseEclBinaryAlloc(allocator, adjusted_len_script, text);
         defer ecl.freeEclBinaryParseResult(allocator, &parsed_ecl);
 
-        try stderr.writer().print("header:\n", .{});
-        for (parsed_ecl.header) |address| {
-            const label = parsed_ecl.var_map.get(.{
-                .address = address,
-                .type = .byte,
-            }).?;
-            try stderr.writer().print("\t{s}\n", .{label});
-        }
-
-        for (parsed_ecl.blocks) |block| {
-            const label = parsed_ecl.var_map.get(.{
-                .address = block.address,
-                .type = .byte,
-            }).?;
-            try stderr.writer().print("{s}:\n", .{label});
-            for (parsed_ecl.getBlockCommands(block)) |cmd| {
-                try stderr.writer().print("\t{s}", .{@tagName(cmd.tag)});
-                for (parsed_ecl.getCommandArgs(cmd)) |arg| {
-                    switch (arg) {
-                        .immediate => |val| {
-                            try stderr.writer().print(" {x}", .{val});
-                        },
-                        .byte_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .byte }).?;
-                            try stderr.writer().print(" {s}", .{name});
-                        },
-                        .word_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .word }).?;
-                            try stderr.writer().print(" {s}", .{name});
-                        },
-                        .dword_var => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .dword }).?;
-                            try stderr.writer().print(" {s}", .{name});
-                        },
-                        .string => |offset| {
-                            const s: [*:0]const u8 = @ptrCast(parsed_ecl.text_bytes[offset..]);
-                            try stderr.writer().print(" \"{s}\"", .{s});
-                        },
-                        .mem_address => |address| {
-                            const name = parsed_ecl.var_map.get(.{ .address = address, .type = .pointer }).?;
-                            try stderr.writer().print(" {s}", .{name});
-                        },
-                    }
-                }
-                try stderr.writer().writeByte('\n');
-            }
-        }
-        for (parsed_ecl.init_data_segments) |segment| {
-            try stderr.writer().print("{s}:\n", .{segment.name});
-            try stderr.writer().print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
-        }
+        try parsed_ecl.serializeText(stderr.writer());
     }
 
     try stderr.flush();

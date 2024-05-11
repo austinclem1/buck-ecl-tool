@@ -40,6 +40,59 @@ pub const EclBinaryParseResult = struct {
         const stop = start + command.args.len;
         return self.args[start..stop];
     }
+    pub fn serializeText(self: *const EclBinaryParseResult, writer: anytype) !void {
+        try writer.print("header:\n", .{});
+        for (self.header) |address| {
+            const label = self.var_map.get(.{
+                .address = address,
+                .type = .byte,
+            }).?;
+            try writer.print("\t{s}\n", .{label});
+        }
+
+        for (self.blocks) |block| {
+            const label = self.var_map.get(.{
+                .address = block.address,
+                .type = .byte,
+            }).?;
+            try writer.print("{s}:\n", .{label});
+            for (self.getBlockCommands(block)) |cmd| {
+                try writer.print("\t{s}", .{@tagName(cmd.tag)});
+                for (self.getCommandArgs(cmd)) |arg| {
+                    switch (arg) {
+                        .immediate => |val| {
+                            try writer.print(" {x}", .{val});
+                        },
+                        .byte_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .byte }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .word_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .word }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .dword_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .dword }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .string => |offset| {
+                            const s: [*:0]const u8 = @ptrCast(self.text_bytes[offset..]);
+                            try writer.print(" \"{s}\"", .{s});
+                        },
+                        .mem_address => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .pointer }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                    }
+                }
+                try writer.writeByte('\n');
+            }
+        }
+        for (self.init_data_segments) |segment| {
+            try writer.print("{s}:\n", .{segment.name});
+            try writer.print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
+        }
+    }
 };
 
 pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !EclBinaryParseResult {
