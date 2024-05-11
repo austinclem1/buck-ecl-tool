@@ -76,17 +76,20 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
     var highest_known_command_address = std.mem.max(u16, &header);
     var last_command_was_conditional = false;
     while (script_fbs.pos + ecl_base <= highest_known_command_address) {
-        const command = try readCommand(script_fbs.reader(), &args, @intCast(script_fbs.pos));
+        const command = try readCommand(script_fbs.reader(), &args, @intCast(ecl_base + script_fbs.pos));
+        try commands.append(command);
 
-        const jump_args = switch (command.tag) {
-            .GOTO, .GOSUB => args.items[command.args.start..],
-            .ONGOTO, .ONGOSUB => args.items[command.args.start + 2 ..],
-            else => &[0]Arg{},
-        };
-        for (jump_args) |arg| {
-            const dest = arg.byte_var;
-            try jump_dests.put(dest, {});
-            highest_known_command_address = @max(dest, highest_known_command_address);
+        {
+            const jump_args = switch (command.tag) {
+                .GOTO, .GOSUB => args.items[command.args.start..],
+                .ONGOTO, .ONGOSUB => args.items[command.args.start + 2 ..],
+                else => &[0]Arg{},
+            };
+            for (jump_args) |arg| {
+                const dest = arg.byte_var;
+                try jump_dests.put(dest, {});
+                highest_known_command_address = @max(dest, highest_known_command_address);
+            }
         }
 
         const possible_vars = switch (command.tag) {
@@ -102,16 +105,17 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 .mem_address => |addr| .{ addr, Var.Type.pointer },
                 else => continue,
             };
+
             if (address >= ecl_base and address < script_bytes.len + ecl_base) {
                 try init_data_refs.put(address, {});
                 continue;
             }
-            const gop = try var_map.getOrPut(VarMapKey{
-                .address = address,
-                .type = var_type,
-            });
-            if (gop.found_existing) continue;
-            if (address >= scratch_start_address and address < scratch_end_address) {
+
+            const key = VarMapKey{ .address = address, .type = var_type };
+            if (var_map.contains(key)) continue;
+
+            const refers_to_scratch = address >= scratch_start_address and address < scratch_end_address;
+            if (refers_to_scratch) {
                 const offset = address - scratch_start_address;
                 const size_letter: u8 = switch (var_type) {
                     .byte => 'b',
@@ -119,12 +123,12 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                     .dword => 'd',
                     .pointer => std.debug.panic("Encountered pointer to scratch space\n", .{}),
                 };
-                const var_name = try std.fmt.allocPrint(
+                const name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
                     "scratch[{d}]{c}",
                     .{ offset, size_letter },
                 );
-                gop.value_ptr.* = var_name;
+                try var_map.putNoClobber(key, name);
             } else {
                 const prefix = switch (var_type) {
                     .byte => "bvar",
@@ -132,12 +136,12 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                     .dword => "dvar",
                     .pointer => "ptr",
                 };
-                const var_name = try std.fmt.allocPrint(
+                const name = try std.fmt.allocPrint(
                     bytes_arena.allocator(),
                     "{s}_{x:0>4}",
                     .{ prefix, address },
                 );
-                gop.value_ptr.* = var_name;
+                try var_map.putNoClobber(key, name);
             }
         }
 
