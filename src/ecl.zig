@@ -76,39 +76,11 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
     var highest_known_command_address = std.mem.max(u16, &header);
     var last_command_was_conditional = false;
     while (script_fbs.pos + ecl_base <= highest_known_command_address) {
-        const command_address: u16 = @intCast(script_fbs.pos + ecl_base);
-        const tag = try script_fbs.reader().readEnum(Command.Tag, .little);
-        const args_start_index = args.items.len;
+        const command = try readCommand(script_fbs.reader(), &args, @intCast(script_fbs.pos));
 
-        switch (tag) {
-            .ONGOTO, .ONGOSUB, .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
-                const arg0 = try parseArg(script_fbs.reader());
-                const arg1 = try parseArg(script_fbs.reader());
-
-                const num_varargs = if (tag == .NEWREGION) arg1.immediate * 4 else arg1.immediate;
-
-                try args.ensureUnusedCapacity(2 + num_varargs);
-
-                args.appendAssumeCapacity(arg0);
-                args.appendAssumeCapacity(arg1);
-
-                for (0..num_varargs) |_| {
-                    const a = try parseArg(script_fbs.reader());
-                    args.appendAssumeCapacity(a);
-                }
-            },
-            else => {
-                try args.ensureUnusedCapacity(tag.getArgCount());
-                for (0..tag.getArgCount()) |_| {
-                    const arg = try parseArg(script_fbs.reader());
-                    args.appendAssumeCapacity(arg);
-                }
-            },
-        }
-
-        const jump_args = switch (tag) {
-            .GOTO, .GOSUB => args.items[args_start_index..],
-            .ONGOTO, .ONGOSUB => args.items[args_start_index + 2 ..],
+        const jump_args = switch (command.tag) {
+            .GOTO, .GOSUB => args.items[command.args.start..],
+            .ONGOTO, .ONGOSUB => args.items[command.args.start + 2 ..],
             else => &[0]Arg{},
         };
         for (jump_args) |arg| {
@@ -117,10 +89,10 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             highest_known_command_address = @max(dest, highest_known_command_address);
         }
 
-        const possible_vars = switch (tag) {
+        const possible_vars = switch (command.tag) {
             .GOTO, .GOSUB => &[0]Arg{},
-            .ONGOTO, .ONGOSUB => args.items[args_start_index .. args_start_index + 2],
-            else => args.items[args_start_index..],
+            .ONGOTO, .ONGOSUB => args.items[command.args.start .. command.args.start + 2],
+            else => args.items[command.args.start..],
         };
         for (possible_vars) |arg| {
             const address, const var_type = switch (arg) {
@@ -169,21 +141,12 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             }
         }
 
-        try commands.append(Command{
-            .tag = tag,
-            .address = command_address,
-            .args = IndexSlice{
-                .start = args_start_index,
-                .len = args.items.len - args_start_index,
-            },
-        });
-
-        if (tag.isFallthrough() or last_command_was_conditional) {
+        if (command.tag.isFallthrough() or last_command_was_conditional) {
             const next_command_address: u16 = @intCast(script_fbs.pos + ecl_base);
             highest_known_command_address = @max(next_command_address, highest_known_command_address);
         }
 
-        last_command_was_conditional = tag.isConditional();
+        last_command_was_conditional = command.tag.isConditional();
     }
 
     {
@@ -316,8 +279,8 @@ const Block = struct {
 };
 pub const Command = struct {
     tag: Tag,
-    address: u16,
     args: IndexSlice,
+    address: u16,
 
     const Tag = enum(u8) {
         EXIT,
@@ -566,7 +529,47 @@ const Arg = union(enum) {
     };
 };
 
-fn parseArg(reader: anytype) !Arg {
+fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Command {
+    const args_start_index = args.items.len;
+    const tag = try reader.readEnum(Command.Tag, .little);
+
+    switch (tag) {
+        .ONGOTO, .ONGOSUB, .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
+            const arg0 = try readArg(reader);
+            const arg1 = try readArg(reader);
+
+            const num_varargs = if (tag == .NEWREGION) arg1.immediate * 4 else arg1.immediate;
+
+            try args.ensureUnusedCapacity(2 + num_varargs);
+
+            args.appendAssumeCapacity(arg0);
+            args.appendAssumeCapacity(arg1);
+
+            for (0..num_varargs) |_| {
+                const a = try readArg(reader);
+                args.appendAssumeCapacity(a);
+            }
+        },
+        else => {
+            try args.ensureUnusedCapacity(tag.getArgCount());
+            for (0..tag.getArgCount()) |_| {
+                const arg = try readArg(reader);
+                args.appendAssumeCapacity(arg);
+            }
+        },
+    }
+
+    return Command{
+        .tag = tag,
+        .args = IndexSlice{
+            .start = args_start_index,
+            .len = args.items.len - args_start_index,
+        },
+        .address = address,
+    };
+}
+
+fn readArg(reader: anytype) !Arg {
     const meta_byte = try reader.readByteSigned();
 
     const encoding = Arg.Encoding.fromMetaByte(meta_byte);
