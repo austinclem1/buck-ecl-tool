@@ -26,7 +26,7 @@ pub const EclBinaryParseResult = struct {
     args: []const Arg,
     init_data_segments: []const InitializedDataSegment,
     bytes_arena: std.heap.ArenaAllocator,
-    var_map: std.AutoHashMapUnmanaged(VarMapKey, []const u8),
+    var_map: VarMap,
     text_bytes: []const u8,
 
     pub fn getBlockCommands(self: *const EclBinaryParseResult, block: Block) []const Command {
@@ -46,23 +46,23 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
     var bytes_arena = std.heap.ArenaAllocator.init(allocator);
     errdefer bytes_arena.deinit();
 
-    var var_map = VarMap{};
-    errdefer var_map.deinit(allocator);
+    var var_map = VarMap.init(allocator);
+    errdefer var_map.deinit();
 
-    var commands = std.ArrayListUnmanaged(Command){};
-    defer commands.deinit(allocator);
+    var commands = std.ArrayList(Command).init(allocator);
+    defer commands.deinit();
 
-    var args = std.ArrayListUnmanaged(Arg){};
-    defer args.deinit(allocator);
+    var args = std.ArrayList(Arg).init(allocator);
+    defer args.deinit();
 
-    var init_data_segments = std.ArrayListUnmanaged(InitializedDataSegment){};
-    defer init_data_segments.deinit(allocator);
+    var init_data_segments = std.ArrayList(InitializedDataSegment).init(allocator);
+    defer init_data_segments.deinit();
 
-    var init_data_refs = std.AutoArrayHashMapUnmanaged(u16, void){};
-    defer init_data_refs.deinit(allocator);
+    var init_data_refs = std.AutoArrayHashMap(u16, void).init(allocator);
+    defer init_data_refs.deinit();
 
-    var jump_dests = std.AutoArrayHashMapUnmanaged(u16, void){};
-    defer jump_dests.deinit(allocator);
+    var jump_dests = std.AutoArrayHashMap(u16, void).init(allocator);
+    defer jump_dests.deinit();
 
     var script_fbs = std.io.fixedBufferStream(script_bytes);
 
@@ -70,7 +70,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
     for (&header) |*address| {
         try script_fbs.seekBy(2);
         address.* = try script_fbs.reader().readInt(u16, .little);
-        try jump_dests.put(allocator, address.*, {});
+        try jump_dests.put(address.*, {});
     }
 
     var highest_known_command_address = std.mem.max(u16, &header);
@@ -87,7 +87,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
 
                 const num_varargs = if (tag == .NEWREGION) arg1.immediate * 4 else arg1.immediate;
 
-                try args.ensureUnusedCapacity(allocator, 2 + num_varargs);
+                try args.ensureUnusedCapacity(2 + num_varargs);
 
                 args.appendAssumeCapacity(arg0);
                 args.appendAssumeCapacity(arg1);
@@ -98,7 +98,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 }
             },
             else => {
-                try args.ensureUnusedCapacity(allocator, tag.getArgCount());
+                try args.ensureUnusedCapacity(tag.getArgCount());
                 for (0..tag.getArgCount()) |_| {
                     const arg = try parseArg(script_fbs.reader());
                     args.appendAssumeCapacity(arg);
@@ -113,7 +113,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         };
         for (jump_args) |arg| {
             const dest = arg.byte_var;
-            try jump_dests.put(allocator, dest, {});
+            try jump_dests.put(dest, {});
             highest_known_command_address = @max(dest, highest_known_command_address);
         }
 
@@ -131,10 +131,10 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 else => continue,
             };
             if (address >= ecl_base and address < script_bytes.len + ecl_base) {
-                try init_data_refs.put(allocator, address, {});
+                try init_data_refs.put(address, {});
                 continue;
             }
-            const gop = try var_map.getOrPut(allocator, VarMapKey{
+            const gop = try var_map.getOrPut(VarMapKey{
                 .address = address,
                 .type = var_type,
             });
@@ -169,7 +169,7 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             }
         }
 
-        try commands.append(allocator, Command{
+        try commands.append(Command{
             .tag = tag,
             .address = command_address,
             .args = IndexSlice{
@@ -194,9 +194,9 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 return ctx.keys[a_index] < ctx.keys[b_index];
             }
         };
-        jump_dests.sortUnstable(SortByAddress{ .keys = jump_dests.keys() });
+        jump_dests.sort(SortByAddress{ .keys = jump_dests.keys() });
     }
-    try var_map.ensureUnusedCapacity(allocator, @intCast(jump_dests.count()));
+    try var_map.ensureUnusedCapacity(@intCast(jump_dests.count()));
     for (jump_dests.keys(), 0..) |address, i| {
         const label = try std.fmt.allocPrint(
             bytes_arena.allocator(),
@@ -209,8 +209,8 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         );
     }
 
-    var blocks = try std.ArrayListUnmanaged(Block).initCapacity(allocator, jump_dests.count());
-    errdefer blocks.deinit(allocator);
+    var blocks = try std.ArrayList(Block).initCapacity(allocator, jump_dests.count());
+    errdefer blocks.deinit();
     std.debug.assert(jump_dests.count() >= 1);
     var command_i: usize = 0;
     for (0..jump_dests.count() - 1) |jump_dest_i| {
@@ -248,10 +248,10 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 return ctx.keys[a_index] < ctx.keys[b_index];
             }
         };
-        init_data_refs.sortUnstable(SortByAddress{ .keys = init_data_refs.keys() });
+        init_data_refs.sort(SortByAddress{ .keys = init_data_refs.keys() });
     }
 
-    try init_data_segments.ensureUnusedCapacity(allocator, init_data_refs.count());
+    try init_data_segments.ensureUnusedCapacity(init_data_refs.count());
     for (0..init_data_refs.count()) |i| {
         const start_address = init_data_refs.keys()[i];
         const end_address = if (i < init_data_refs.count() - 1) init_data_refs.keys()[i + 1] else script_bytes.len + ecl_base;
@@ -262,7 +262,6 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
             .{i},
         );
         try var_map.putNoClobber(
-            allocator,
             VarMapKey{ .address = start_address, .type = .byte },
             name,
         );
@@ -278,10 +277,10 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
 
     const result = EclBinaryParseResult{
         .header = header,
-        .blocks = try blocks.toOwnedSlice(allocator),
-        .commands = try commands.toOwnedSlice(allocator),
-        .args = try args.toOwnedSlice(allocator),
-        .init_data_segments = try init_data_segments.toOwnedSlice(allocator),
+        .blocks = try blocks.toOwnedSlice(),
+        .commands = try commands.toOwnedSlice(),
+        .args = try args.toOwnedSlice(),
+        .init_data_segments = try init_data_segments.toOwnedSlice(),
         .bytes_arena = bytes_arena,
         .var_map = var_map,
         .text_bytes = try allocator.dupe(u8, text_bytes),
@@ -302,7 +301,7 @@ pub fn freeEclBinaryParseResult(allocator: std.mem.Allocator, parse_result: *Ecl
     allocator.free(parse_result.args);
     allocator.free(parse_result.init_data_segments);
     parse_result.bytes_arena.deinit();
-    parse_result.var_map.deinit(allocator);
+    parse_result.var_map.deinit();
     allocator.free(parse_result.text_bytes);
 }
 
@@ -599,7 +598,7 @@ const Var = struct {
     };
 };
 
-const VarMap = std.AutoHashMapUnmanaged(VarMapKey, []const u8);
+const VarMap = std.AutoHashMap(VarMapKey, []const u8);
 
 pub const VarMapKey = struct {
     address: u16,
