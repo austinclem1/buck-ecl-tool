@@ -82,8 +82,8 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
 
         switch (tag) {
             .ONGOTO, .ONGOSUB, .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
-                const arg0 = try readArg(script_fbs.reader());
-                const arg1 = try readArg(script_fbs.reader());
+                const arg0 = try parseArg(script_fbs.reader());
+                const arg1 = try parseArg(script_fbs.reader());
 
                 const num_varargs = if (tag == .NEWREGION) arg1.immediate * 4 else arg1.immediate;
 
@@ -93,14 +93,14 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
                 args.appendAssumeCapacity(arg1);
 
                 for (0..num_varargs) |_| {
-                    const a = try readArg(script_fbs.reader());
+                    const a = try parseArg(script_fbs.reader());
                     args.appendAssumeCapacity(a);
                 }
             },
             else => {
                 try args.ensureUnusedCapacity(allocator, tag.getArgCount());
                 for (0..tag.getArgCount()) |_| {
-                    const arg = try readArg(script_fbs.reader());
+                    const arg = try parseArg(script_fbs.reader());
                     args.appendAssumeCapacity(arg);
                 }
             },
@@ -567,7 +567,7 @@ const Arg = union(enum) {
     };
 };
 
-fn readArg(reader: anytype) !Arg {
+fn parseArg(reader: anytype) !Arg {
     const meta_byte = try reader.readByteSigned();
 
     const encoding = Arg.Encoding.fromMetaByte(meta_byte);
