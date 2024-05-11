@@ -561,7 +561,7 @@ const Arg = union(enum) {
                 5 => .dword_var,
                 -0x80 => .string,
                 -0x7f => .mem_address,
-                else => unreachable,
+                else => std.debug.panic("Unkown arg encoding byte: {d}\n", .{meta_byte}),
             };
         }
     };
