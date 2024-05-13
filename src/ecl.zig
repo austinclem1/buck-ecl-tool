@@ -40,6 +40,7 @@ pub const EclBinaryParseResult = struct {
         const stop = start + command.args.len;
         return self.args[start..stop];
     }
+
     pub fn serializeText(self: *const EclBinaryParseResult, writer: anytype) !void {
         try writer.print("header:\n", .{});
         for (self.header) |address| {
@@ -91,6 +92,69 @@ pub const EclBinaryParseResult = struct {
         for (self.init_data_segments) |segment| {
             try writer.print("{s}:\n", .{segment.name});
             try writer.print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
+        }
+    }
+
+    pub fn serializeBinary(self: *const EclBinaryParseResult, writer: anytype) !void {
+        var counting_writer = std.io.countingWriter(writer);
+        const w = counting_writer.writer();
+
+        for (self.header) |address| {
+            try w.writeInt(u16, 0x0101, .little);
+            try w.writeInt(u16, address, .little);
+        }
+        for (self.commands) |command| {
+            try w.writeByte(@intFromEnum(command.tag));
+            for (self.getCommandArgs(command)) |arg| {
+                try writeArg(arg, w);
+            }
+        }
+
+        for (self.init_data_segments) |segment| {
+            try w.writeAll(segment.bytes);
+        }
+
+        if (counting_writer.bytes_written % 2 == 1) {
+            try w.writeByte(0);
+        }
+    }
+
+    fn writeArg(arg: Arg, writer: anytype) !void {
+        const encoding = arg.getEncoding();
+        const meta_byte = encoding.getMetaByte();
+        switch (encoding) {
+            .immediate1 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeByte(@intCast(arg.immediate));
+            },
+            .immediate2 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.immediate), .little);
+            },
+            .immediate4 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u32, @intCast(arg.immediate), .little);
+            },
+            .byte_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.byte_var), .little);
+            },
+            .word_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.word_var), .little);
+            },
+            .dword_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.dword_var), .little);
+            },
+            .mem_address => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.mem_address), .little);
+            },
+            .string => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.string), .little);
+            },
         }
     }
 };
@@ -589,7 +653,35 @@ const Arg = union(enum) {
                 else => std.debug.panic("Unkown arg encoding byte: {d}\n", .{meta_byte}),
             };
         }
+
+        fn getMetaByte(encoding: Encoding) i8 {
+            return switch (encoding) {
+                .immediate1 => 0,
+                .immediate2 => 2,
+                .immediate4 => 4,
+                .byte_var => 1,
+                .word_var => 3,
+                .dword_var => 5,
+                .string => -0x80,
+                .mem_address => -0x7f,
+            };
+        }
     };
+
+    fn getEncoding(arg: Arg) Encoding {
+        switch (arg) {
+            .immediate => |val| {
+                if (val <= std.math.maxInt(u8)) return .immediate1;
+                if (val <= std.math.maxInt(u16)) return .immediate2;
+                return .immediate4;
+            },
+            .byte_var => return .byte_var,
+            .word_var => return .word_var,
+            .dword_var => return .dword_var,
+            .string => return .string,
+            .mem_address => return .mem_address,
+        }
+    }
 };
 
 fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Command {
