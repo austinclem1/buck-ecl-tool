@@ -260,6 +260,12 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         },
     });
 
+    if (script_fbs.pos < script_bytes.len) {
+        // if more bytes remain in script, assume they are initialized bytes
+        // track a reference to the beginning of those bytes even if no
+        // command has used them
+        try init_data_refs.put(@intCast(script_fbs.pos + ecl_base), {});
+    }
     {
         const SortByAddress = struct {
             keys: []const u16,
