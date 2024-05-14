@@ -376,12 +376,6 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         .text_bytes = try allocator.dupe(u8, text_bytes),
     };
 
-    errdefer allocator.free(result.blocks);
-    errdefer allocator.free(result.commands);
-    errdefer allocator.free(result.args);
-    errdefer allocator.free(result.init_data_segments);
-    errdefer allocator.free(result.text_bytes);
-
     return result;
 }
 
