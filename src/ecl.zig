@@ -324,10 +324,14 @@ pub fn parseEclBinaryAlloc(allocator: std.mem.Allocator, script_bytes: []const u
         },
     });
 
-    if (script_fbs.pos < script_bytes.len) {
-        // if more bytes remain in script, assume they are initialized bytes
-        // track a reference to the beginning of those bytes even if no
-        // command has used them
+    const bytes_remaining = script_bytes.len - script_fbs.pos;
+    if (bytes_remaining > 1) {
+        try init_data_refs.put(@intCast(script_fbs.pos + ecl_base), {});
+    } else if (bytes_remaining == 1 and script_bytes[script_fbs.pos] != 0) {
+        // If one byte remains and is a null byte, don't create an init data
+        // section for it, it's probably just padding
+        // If it has been referenced by any script command args, it will
+        // already be reflected in init_data_refs in that case
         try init_data_refs.put(@intCast(script_fbs.pos + ecl_base), {});
     }
     {
