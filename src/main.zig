@@ -17,11 +17,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     var allocator = gpa.allocator();
 
-    const file = try std.fs.cwd().openFile(memdump_path, .{});
-    defer file.close();
-
-    const genesis_mem = try allocator.alloc(u8, 64 * 1024);
-    defer allocator.free(genesis_mem);
 
     for (level_ids) |level_id| {
         // we skip 0x61 because there might be a bug in the game or this particular rom dump
@@ -70,6 +65,10 @@ pub fn main() !void {
         defer ecl.freeEclBinaryParseResult(allocator, &parsed_ecl);
 
         try parsed_ecl.serializeText(stderr.writer());
+        var bin = std.ArrayList(u8).init(allocator);
+        defer bin.deinit();
+        try parsed_ecl.serializeBinary(bin.writer());
+        std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
     }
 
     try stderr.flush();
