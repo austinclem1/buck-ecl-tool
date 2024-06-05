@@ -1,0 +1,543 @@
+const std = @import("std");
+
+const CommandTag = @import("CommandTag.zig").Tag;
+
+const ecl_base = 0x6af6;
+const scratch_start_address = 0x9e6f;
+const scratch_end_address = 0x9e79;
+
+const Command = struct {
+    tag: CommandTag,
+    args: IndexSlice,
+    address: u16,
+};
+
+pub const ParseResult = struct {
+    header: [5]u16,
+    blocks: []const Block,
+    commands: []const Command,
+    args: []const Arg,
+    init_data_segments: []const InitializedDataSegment,
+    bytes_arena: std.heap.ArenaAllocator,
+    var_map: VarMap,
+    text_bytes: []const u8,
+
+    pub fn getBlockCommands(self: *const ParseResult, block: Block) []const Command {
+        const start = block.commands.start;
+        const stop = start + block.commands.len;
+        return self.commands[start..stop];
+    }
+
+    pub fn getCommandArgs(self: *const ParseResult, command: Command) []const Arg {
+        const start = command.args.start;
+        const stop = start + command.args.len;
+        return self.args[start..stop];
+    }
+
+    pub fn serializeText(self: *const ParseResult, writer: anytype) !void {
+        try writer.print("header:\n", .{});
+        for (self.header) |address| {
+            const label = self.var_map.get(.{
+                .address = address,
+                .type = .byte,
+            }).?;
+            try writer.print("\t{s}\n", .{label});
+        }
+
+        for (self.blocks) |block| {
+            const label = self.var_map.get(.{
+                .address = block.address,
+                .type = .byte,
+            }).?;
+            try writer.print("{s}:\n", .{label});
+            for (self.getBlockCommands(block)) |cmd| {
+                try writer.print("\t{s}", .{@tagName(cmd.tag)});
+                for (self.getCommandArgs(cmd)) |arg| {
+                    switch (arg) {
+                        .immediate => |val| {
+                            try writer.print(" {x}", .{val});
+                        },
+                        .byte_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .byte }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .word_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .word }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .dword_var => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .dword }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                        .string => |offset| {
+                            const s: [*:0]const u8 = @ptrCast(self.text_bytes[offset..]);
+                            try writer.print(" \"{s}\"", .{s});
+                        },
+                        .mem_address => |address| {
+                            const name = self.var_map.get(.{ .address = address, .type = .pointer }).?;
+                            try writer.print(" {s}", .{name});
+                        },
+                    }
+                }
+                try writer.writeByte('\n');
+            }
+        }
+        for (self.init_data_segments) |segment| {
+            try writer.print("{s}:\n", .{segment.name});
+            try writer.print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
+        }
+    }
+
+    pub fn serializeBinary(self: *const ParseResult, writer: anytype) !void {
+        var counting_writer = std.io.countingWriter(writer);
+        const w = counting_writer.writer();
+
+        for (self.header) |address| {
+            try w.writeInt(u16, 0x0101, .little);
+            try w.writeInt(u16, address, .little);
+        }
+        for (self.commands) |command| {
+            try w.writeByte(@intFromEnum(command.tag));
+            for (self.getCommandArgs(command)) |arg| {
+                try writeArg(arg, w);
+            }
+        }
+
+        for (self.init_data_segments) |segment| {
+            try w.writeAll(segment.bytes);
+        }
+
+        if (counting_writer.bytes_written % 2 == 1) {
+            try w.writeByte(0);
+        }
+    }
+
+    fn writeArg(arg: Arg, writer: anytype) !void {
+        const encoding = arg.getEncoding();
+        const meta_byte = encoding.getMetaByte();
+        switch (encoding) {
+            .immediate1 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeByte(@intCast(arg.immediate));
+            },
+            .immediate2 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.immediate), .little);
+            },
+            .immediate4 => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u32, @intCast(arg.immediate), .little);
+            },
+            .byte_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.byte_var), .little);
+            },
+            .word_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.word_var), .little);
+            },
+            .dword_var => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.dword_var), .little);
+            },
+            .mem_address => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.mem_address), .little);
+            },
+            .string => {
+                try writer.writeInt(i8, meta_byte, .little);
+                try writer.writeInt(u16, @intCast(arg.string), .little);
+            },
+        }
+    }
+};
+
+pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !ParseResult {
+    var bytes_arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer bytes_arena.deinit();
+
+    var var_map = VarMap.init(allocator);
+    errdefer var_map.deinit();
+
+    var commands = std.ArrayList(Command).init(allocator);
+    defer commands.deinit();
+
+    var args = std.ArrayList(Arg).init(allocator);
+    defer args.deinit();
+
+    var init_data_segments = std.ArrayList(InitializedDataSegment).init(allocator);
+    defer init_data_segments.deinit();
+
+    var init_data_refs = std.AutoArrayHashMap(u16, void).init(allocator);
+    defer init_data_refs.deinit();
+
+    var jump_dests = std.AutoArrayHashMap(u16, void).init(allocator);
+    defer jump_dests.deinit();
+
+    var script_fbs = std.io.fixedBufferStream(script_bytes);
+
+    var header: [5]u16 = undefined;
+    for (&header) |*address| {
+        try script_fbs.seekBy(2);
+        address.* = try script_fbs.reader().readInt(u16, .little);
+        try jump_dests.put(address.*, {});
+    }
+
+    var highest_known_command_address = std.mem.max(u16, &header);
+    var last_command_was_conditional = false;
+    while (script_fbs.pos + ecl_base <= highest_known_command_address) {
+        const command = try readCommand(script_fbs.reader(), &args, @intCast(ecl_base + script_fbs.pos));
+        try commands.append(command);
+
+        {
+            const jump_args = switch (command.tag) {
+                .GOTO, .GOSUB => args.items[command.args.start..],
+                .ONGOTO, .ONGOSUB => args.items[command.args.start + 2 ..],
+                else => &[0]Arg{},
+            };
+            for (jump_args) |arg| {
+                const dest = arg.byte_var;
+                try jump_dests.put(dest, {});
+                highest_known_command_address = @max(dest, highest_known_command_address);
+            }
+        }
+
+        const possible_vars = switch (command.tag) {
+            .GOTO, .GOSUB => &[0]Arg{},
+            .ONGOTO, .ONGOSUB => args.items[command.args.start .. command.args.start + 2],
+            else => args.items[command.args.start..],
+        };
+        for (possible_vars) |arg| {
+            const address, const var_type = switch (arg) {
+                .byte_var => |addr| .{ addr, Var.Type.byte },
+                .word_var => |addr| .{ addr, Var.Type.word },
+                .dword_var => |addr| .{ addr, Var.Type.dword },
+                .mem_address => |addr| .{ addr, Var.Type.pointer },
+                else => continue,
+            };
+
+            if (address >= ecl_base and address < script_bytes.len + ecl_base) {
+                try init_data_refs.put(address, {});
+                continue;
+            }
+
+            const key = VarMapKey{ .address = address, .type = var_type };
+            if (var_map.contains(key)) continue;
+
+            const refers_to_scratch = address >= scratch_start_address and address < scratch_end_address;
+            if (refers_to_scratch) {
+                const offset = address - scratch_start_address;
+                const size_letter: u8 = switch (var_type) {
+                    .byte => 'b',
+                    .word => 'w',
+                    .dword => 'd',
+                    .pointer => std.debug.panic("Encountered pointer to scratch space\n", .{}),
+                };
+                const name = try std.fmt.allocPrint(
+                    bytes_arena.allocator(),
+                    "scratch[{d}]{c}",
+                    .{ offset, size_letter },
+                );
+                try var_map.putNoClobber(key, name);
+            } else {
+                const prefix = switch (var_type) {
+                    .byte => "bvar",
+                    .word => "wvar",
+                    .dword => "dvar",
+                    .pointer => "ptr",
+                };
+                const name = try std.fmt.allocPrint(
+                    bytes_arena.allocator(),
+                    "{s}_{x:0>4}",
+                    .{ prefix, address },
+                );
+                try var_map.putNoClobber(key, name);
+            }
+        }
+
+        if (command.tag.isFallthrough() or last_command_was_conditional) {
+            const next_command_address: u16 = @intCast(script_fbs.pos + ecl_base);
+            highest_known_command_address = @max(next_command_address, highest_known_command_address);
+        }
+
+        last_command_was_conditional = command.tag.isConditional();
+    }
+
+    {
+        const SortByAddress = struct {
+            keys: []const u16,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.keys[a_index] < ctx.keys[b_index];
+            }
+        };
+        jump_dests.sort(SortByAddress{ .keys = jump_dests.keys() });
+    }
+    try var_map.ensureUnusedCapacity(@intCast(jump_dests.count()));
+    for (jump_dests.keys(), 0..) |address, i| {
+        const label = try std.fmt.allocPrint(
+            bytes_arena.allocator(),
+            "label{d}",
+            .{i},
+        );
+        var_map.putAssumeCapacityNoClobber(
+            .{ .address = address, .type = .byte },
+            label,
+        );
+    }
+
+    var blocks = try std.ArrayList(Block).initCapacity(allocator, jump_dests.count());
+    errdefer blocks.deinit();
+    std.debug.assert(jump_dests.count() >= 1);
+    var command_i: usize = 0;
+    for (0..jump_dests.count() - 1) |jump_dest_i| {
+        const block_start_address = jump_dests.keys()[jump_dest_i];
+        const block_end_address = jump_dests.keys()[jump_dest_i + 1];
+        const commands_start = command_i;
+        // find first command at or past the end address of this block
+        const commands_end = while (command_i < commands.items.len) : (command_i += 1) {
+            const cmd = commands.items[command_i];
+            if (cmd.address >= block_end_address) break command_i;
+        } else commands.items.len;
+        blocks.appendAssumeCapacity(.{
+            .address = block_start_address,
+            .commands = IndexSlice{
+                .start = commands_start,
+                .len = commands_end - commands_start,
+            },
+        });
+    }
+    // final block is any remaining commands
+    const last_block_start_address = jump_dests.keys()[jump_dests.count() - 1];
+    blocks.appendAssumeCapacity(.{
+        .address = last_block_start_address,
+        .commands = IndexSlice{
+            .start = command_i,
+            .len = commands.items.len - command_i,
+        },
+    });
+
+    const bytes_remaining = script_bytes.len - script_fbs.pos;
+    if (bytes_remaining > 1) {
+        try init_data_refs.put(@intCast(script_fbs.pos + ecl_base), {});
+    } else if (bytes_remaining == 1 and script_bytes[script_fbs.pos] != 0) {
+        // If one byte remains and is a null byte, don't create an init data
+        // section for it, it's probably just padding
+        // If it has been referenced by any script command args, it will
+        // already be reflected in init_data_refs in that case
+        try init_data_refs.put(@intCast(script_fbs.pos + ecl_base), {});
+    }
+    {
+        const SortByAddress = struct {
+            keys: []const u16,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.keys[a_index] < ctx.keys[b_index];
+            }
+        };
+        init_data_refs.sort(SortByAddress{ .keys = init_data_refs.keys() });
+    }
+
+    try init_data_segments.ensureUnusedCapacity(init_data_refs.count());
+    for (0..init_data_refs.count()) |i| {
+        const start_address = init_data_refs.keys()[i];
+        const end_address = if (i < init_data_refs.count() - 1) init_data_refs.keys()[i + 1] else script_bytes.len + ecl_base;
+
+        const name = try std.fmt.allocPrint(
+            bytes_arena.allocator(),
+            "init_data{d}",
+            .{i},
+        );
+        try var_map.putNoClobber(
+            VarMapKey{ .address = start_address, .type = .byte },
+            name,
+        );
+
+        const start = start_address - ecl_base;
+        const end = end_address - ecl_base;
+        const duped_bytes = try bytes_arena.allocator().dupe(u8, script_bytes[start..end]);
+        init_data_segments.appendAssumeCapacity(.{
+            .name = name,
+            .bytes = duped_bytes,
+        });
+    }
+
+    const result = ParseResult{
+        .header = header,
+        .blocks = try blocks.toOwnedSlice(),
+        .commands = try commands.toOwnedSlice(),
+        .args = try args.toOwnedSlice(),
+        .init_data_segments = try init_data_segments.toOwnedSlice(),
+        .bytes_arena = bytes_arena,
+        .var_map = var_map,
+        .text_bytes = try allocator.dupe(u8, text_bytes),
+    };
+
+    return result;
+}
+
+pub fn freeParseResult(allocator: std.mem.Allocator, parse_result: *ParseResult) void {
+    allocator.free(parse_result.blocks);
+    allocator.free(parse_result.commands);
+    allocator.free(parse_result.args);
+    allocator.free(parse_result.init_data_segments);
+    parse_result.bytes_arena.deinit();
+    parse_result.var_map.deinit();
+    allocator.free(parse_result.text_bytes);
+}
+
+const IndexSlice = struct {
+    start: usize,
+    len: usize,
+};
+
+const Block = struct {
+    address: u16,
+    commands: IndexSlice,
+};
+
+const Arg = union(enum) {
+    immediate: u32,
+    byte_var: u16,
+    word_var: u16,
+    dword_var: u16,
+    string: u16,
+    mem_address: u16,
+
+    const Encoding = enum {
+        immediate1,
+        immediate2,
+        immediate4,
+        byte_var,
+        word_var,
+        dword_var,
+        string,
+        mem_address,
+
+        fn fromMetaByte(meta_byte: i8) Encoding {
+            return switch (meta_byte) {
+                0 => .immediate1,
+                2 => .immediate2,
+                4 => .immediate4,
+                1 => .byte_var,
+                3 => .word_var,
+                5 => .dword_var,
+                -0x80 => .string,
+                -0x7f => .mem_address,
+                else => std.debug.panic("Unkown arg encoding byte: {d}\n", .{meta_byte}),
+            };
+        }
+
+        fn getMetaByte(encoding: Encoding) i8 {
+            return switch (encoding) {
+                .immediate1 => 0,
+                .immediate2 => 2,
+                .immediate4 => 4,
+                .byte_var => 1,
+                .word_var => 3,
+                .dword_var => 5,
+                .string => -0x80,
+                .mem_address => -0x7f,
+            };
+        }
+    };
+
+    fn getEncoding(arg: Arg) Encoding {
+        switch (arg) {
+            .immediate => |val| {
+                if (val <= std.math.maxInt(u8)) return .immediate1;
+                if (val <= std.math.maxInt(u16)) return .immediate2;
+                return .immediate4;
+            },
+            .byte_var => return .byte_var,
+            .word_var => return .word_var,
+            .dword_var => return .dword_var,
+            .string => return .string,
+            .mem_address => return .mem_address,
+        }
+    }
+};
+
+fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Command {
+    const args_start_index = args.items.len;
+    const tag = try reader.readEnum(CommandTag, .little);
+
+    switch (tag) {
+        .ONGOTO, .ONGOSUB, .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
+            const arg0 = try readArg(reader);
+            const arg1 = try readArg(reader);
+
+            const num_varargs = if (tag == .NEWREGION) arg1.immediate * 4 else arg1.immediate;
+
+            try args.ensureUnusedCapacity(2 + num_varargs);
+
+            args.appendAssumeCapacity(arg0);
+            args.appendAssumeCapacity(arg1);
+
+            for (0..num_varargs) |_| {
+                const a = try readArg(reader);
+                args.appendAssumeCapacity(a);
+            }
+        },
+        else => {
+            try args.ensureUnusedCapacity(tag.getArgCount());
+            for (0..tag.getArgCount()) |_| {
+                const arg = try readArg(reader);
+                args.appendAssumeCapacity(arg);
+            }
+        },
+    }
+
+    return Command{
+        .tag = tag,
+        .args = IndexSlice{
+            .start = args_start_index,
+            .len = args.items.len - args_start_index,
+        },
+        .address = address,
+    };
+}
+
+fn readArg(reader: anytype) !Arg {
+    const meta_byte = try reader.readByteSigned();
+
+    const encoding = Arg.Encoding.fromMetaByte(meta_byte);
+
+    const result: Arg = switch (encoding) {
+        .immediate1 => .{ .immediate = try reader.readByte() },
+        .immediate2 => .{ .immediate = try reader.readInt(u16, .little) },
+        .immediate4 => .{ .immediate = try reader.readInt(u32, .little) },
+        .byte_var => .{ .byte_var = try reader.readInt(u16, .little) },
+        .word_var => .{ .word_var = try reader.readInt(u16, .little) },
+        .dword_var => .{ .dword_var = try reader.readInt(u16, .little) },
+        .string => .{ .string = try reader.readInt(u16, .little) },
+        .mem_address => .{ .mem_address = try reader.readInt(u16, .little) },
+    };
+
+    return result;
+}
+
+const Var = struct {
+    address: u16,
+    type: Type,
+    name: []const u8,
+
+    const Type = enum {
+        byte,
+        word,
+        dword,
+        pointer,
+    };
+};
+
+const VarMap = std.AutoHashMap(VarMapKey, []const u8);
+
+pub const VarMapKey = struct {
+    address: u16,
+    type: Var.Type,
+};
+
+const InitializedDataSegment = struct {
+    name: []const u8,
+    bytes: []const u8,
+};

@@ -17,7 +17,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     var allocator = gpa.allocator();
 
-
     for (level_ids) |level_id| {
         // we skip 0x61 because there might be a bug in the game or this particular rom dump
         // where an END code isn't found, so it just keeps decompressing subsequent data from later levels'
@@ -61,8 +60,8 @@ pub fn main() !void {
         try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
-        var parsed_ecl = try ecl.parseEclBinaryAlloc(allocator, adjusted_len_script, text);
-        defer ecl.freeEclBinaryParseResult(allocator, &parsed_ecl);
+        var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_script, text);
+        defer ecl.binary_parser.freeParseResult(allocator, &parsed_ecl);
 
         try parsed_ecl.serializeText(stderr.writer());
         var bin = std.ArrayList(u8).init(allocator);
