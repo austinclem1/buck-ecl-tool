@@ -44,6 +44,7 @@ pub const InitSegment = struct {
 
 pub const Var = struct {
     name: []const u8,
+    address: u16,
     var_type: VarType,
 };
 

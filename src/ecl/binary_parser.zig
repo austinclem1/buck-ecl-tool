@@ -340,6 +340,7 @@ fn getVarsFromVarMap(allocator: std.mem.Allocator, var_map: std.AutoArrayHashMap
     while (it.next()) |entry| {
         vars.appendAssumeCapacity(.{
             .name = entry.value_ptr.*,
+            .address = entry.key_ptr.address,
             .var_type = entry.key_ptr.var_type,
         });
     }
