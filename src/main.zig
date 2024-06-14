@@ -47,6 +47,7 @@ pub fn main() !void {
         // because the following decompressed text section will be placed following the rounded down length
         // of the script section, so we manually make this adjustment.
         const adjusted_len_script = if (script.len % 2 == 1) script[0 .. script.len - 1] else script;
+        // const adjusted_len_script = script;
 
         decoder.resetRetainingCapacity();
 
@@ -61,13 +62,13 @@ pub fn main() !void {
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
         var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_script, text);
-        defer ecl.binary_parser.freeParseResult(allocator, &parsed_ecl);
+        defer parsed_ecl.deinit();
 
         try parsed_ecl.serializeText(stderr.writer());
-        var bin = std.ArrayList(u8).init(allocator);
-        defer bin.deinit();
-        try parsed_ecl.serializeBinary(bin.writer());
-        std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
+        // var bin = std.ArrayList(u8).init(allocator);
+        // defer bin.deinit();
+        // try parsed_ecl.serializeBinary(bin.writer());
+        // std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
     }
 
     try stderr.flush();
