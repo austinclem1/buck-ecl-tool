@@ -430,7 +430,7 @@ const Arg = union(enum) {
         string,
         mem_address,
 
-        fn fromMetaByte(meta_byte: i8) Encoding {
+        fn fromMetaByte(meta_byte: u8) Encoding {
             return switch (meta_byte) {
                 0 => .immediate1,
                 2 => .immediate2,
@@ -438,13 +438,13 @@ const Arg = union(enum) {
                 1 => .byte_var,
                 3 => .word_var,
                 5 => .dword_var,
-                -0x80 => .string,
-                -0x7f => .mem_address,
+                0x80 => .string,
+                0x81 => .mem_address,
                 else => std.debug.panic("Unkown arg encoding byte: {d}\n", .{meta_byte}),
             };
         }
 
-        fn getMetaByte(encoding: Encoding) i8 {
+        fn getMetaByte(encoding: Encoding) u8 {
             return switch (encoding) {
                 .immediate1 => 0,
                 .immediate2 => 2,
@@ -452,8 +452,8 @@ const Arg = union(enum) {
                 .byte_var => 1,
                 .word_var => 3,
                 .dword_var => 5,
-                .string => -0x80,
-                .mem_address => -0x7f,
+                .string => 0x80,
+                .mem_address => 0x81,
             };
         }
     };
@@ -515,7 +515,7 @@ fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Comman
 }
 
 fn readArg(reader: anytype) !Arg {
-    const meta_byte = try reader.readByteSigned();
+    const meta_byte = try reader.readByte();
 
     const encoding = Arg.Encoding.fromMetaByte(meta_byte);
 
