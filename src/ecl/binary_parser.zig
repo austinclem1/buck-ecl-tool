@@ -36,9 +36,11 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
     defer allocator.free(commands);
     defer allocator.free(args);
 
-    // if bytes still remain after reading all commands and args, assume they are
+    // if multiple bytes still remain after reading all commands and args, assume they are
     // initialized bytes that must be tracked
-    if (script_stream.pos < try script_stream.getEndPos()) {
+    // if 1 byte remains, it's probably just padding to
+    // keep the script alignment of 2
+    if (try script_stream.getEndPos() - script_stream.pos > 1) {
         try init_data_refs.put(@intCast(ecl_base + script_stream.pos), {});
     }
 
