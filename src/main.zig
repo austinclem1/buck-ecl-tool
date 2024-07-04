@@ -66,10 +66,11 @@ pub fn main() !void {
 
         try parsed_ecl.serializeText(stderr.writer());
         if (level_id != 0x43) {
-            var bin = std.ArrayList(u8).init(allocator);
-            defer bin.deinit();
-            try parsed_ecl.serializeBinary(allocator, bin.writer());
-            std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
+            const bin_result = try parsed_ecl.serializeBinary(allocator);
+            defer allocator.free(bin_result.script);
+            defer allocator.free(bin_result.text);
+            std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin_result.script));
+            std.debug.assert(std.mem.eql(u8, text, bin_result.text));
         }
     }
 

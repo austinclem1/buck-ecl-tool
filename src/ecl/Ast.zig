@@ -123,7 +123,12 @@ const AddressStub = struct {
     };
 };
 
-pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator, writer: anytype) !void {
+pub const EclBinary = struct {
+    script: []u8,
+    text: []u8,
+};
+
+pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator) !EclBinary {
     var binary = std.ArrayList(u8).init(allocator);
     defer binary.deinit();
 
@@ -180,7 +185,15 @@ pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator, write
         try w.writeByte(0);
     }
 
-    try writer.writeAll(binary.items);
+    const out_script = try binary.toOwnedSlice();
+    errdefer allocator.free(out_script);
+    const out_text = try string_bytes.toOwnedSlice();
+    errdefer allocator.free(out_text);
+
+    return EclBinary{
+        .script = out_script,
+        .text = out_text,
+    };
 }
 
 fn writeArgBinary(arg: Arg, out_binary: *std.ArrayList(u8), vars: []const Var, address_stubs: *std.ArrayList(AddressStub), string_bytes: *std.ArrayList(u8)) !void {
