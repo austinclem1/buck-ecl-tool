@@ -15,7 +15,7 @@ const Command = struct {
     address: u16,
 };
 
-pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8) !Ast {
+pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_bytes: []const u8, initial_highest_known_command_address: ?u16) !Ast {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
@@ -32,7 +32,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
 
     var script_stream = std.io.fixedBufferStream(script_bytes);
 
-    const header, const commands, const args = try readHeaderAndCommands(allocator, &script_stream);
+    const header, const commands, const args = try readHeaderAndCommands(allocator, &script_stream, initial_highest_known_command_address);
     defer allocator.free(commands);
     defer allocator.free(args);
 
@@ -130,7 +130,7 @@ fn readHeader(reader: anytype) ![5]u16 {
     return result;
 }
 
-fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.FixedBufferStream([]const u8)) !struct { [5]u16, []Command, []Arg } {
+fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.FixedBufferStream([]const u8), initial_highest_known_command_address: ?u16) !struct { [5]u16, []Command, []Arg } {
     var commands = std.ArrayList(Command).init(allocator);
     defer commands.deinit();
     var args = std.ArrayList(Arg).init(allocator);
@@ -138,6 +138,9 @@ fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.Fi
 
     const header = try readHeader(script_stream.reader());
     var highest_known_command_address = std.mem.max(u16, &header);
+    if (initial_highest_known_command_address) |address| {
+        highest_known_command_address = @max(address, highest_known_command_address);
+    }
 
     var last_command_was_conditional = false;
     while (script_stream.pos + ecl_base <= highest_known_command_address) {

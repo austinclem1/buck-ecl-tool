@@ -61,7 +61,8 @@ pub fn main() !void {
         try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
         try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
-        var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_script, text);
+        const initial_highest_known_command_address: ?u16 = if (level_id == 0x60) 0x907 + 0x6af6 else null;
+        var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_script, text, initial_highest_known_command_address);
         defer parsed_ecl.deinit();
 
         try parsed_ecl.serializeText(stderr.writer());
