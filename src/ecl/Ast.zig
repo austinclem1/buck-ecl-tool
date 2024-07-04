@@ -6,6 +6,9 @@ const CommandTag = @import("CommandTag.zig").Tag;
 const VarType = @import("VarType.zig").VarType;
 const IndexSlice = @import("../IndexSlice.zig");
 
+const ecl_base = 0x6af6;
+const stub_address: u16 = 0;
+
 header: [5]usize,
 blocks: []const Block,
 commands: []const Command,
@@ -29,7 +32,7 @@ pub const Command = struct {
 };
 
 pub const Arg = union(enum) {
-    immediate: usize,
+    immediate: u32,
     var_use: usize,
     ptr_deref: PtrDeref,
     jump_dest_block: usize,
@@ -110,65 +113,137 @@ pub fn serializeText(self: *const @This(), writer: anytype) !void {
     }
 }
 
-// pub fn serializeBinary(self: *const @This(), writer: anytype) !void {
-//     var counting_writer = std.io.countingWriter(writer);
-//     const w = counting_writer.writer();
-//
-//     for (self.header) |address| {
-//         try w.writeInt(u16, 0x0101, .little);
-//         try w.writeInt(u16, address, .little);
-//     }
-//     for (self.commands) |command| {
-//         try w.writeByte(@intFromEnum(command.tag));
-//         for (self.getCommandArgs(command)) |arg| {
-//             try writeArgBinary(arg, w);
-//         }
-//     }
-//
-//     for (self.init_data_segments) |segment| {
-//         try w.writeAll(segment.bytes);
-//     }
-//
-//     if (counting_writer.bytes_written % 2 == 1) {
-//         try w.writeByte(0);
-//     }
-// }
-//
-// fn writeArgBinary(arg: Arg, writer: anytype) !void {
-//     const encoding = arg.getEncoding();
-//     const meta_byte = encoding.getMetaByte();
-//     switch (encoding) {
-//         .immediate1 => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeByte(@intCast(arg.immediate));
-//         },
-//         .immediate2 => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.immediate), .little);
-//         },
-//         .immediate4 => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u32, @intCast(arg.immediate), .little);
-//         },
-//         .byte_var => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.byte_var), .little);
-//         },
-//         .word_var => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.word_var), .little);
-//         },
-//         .dword_var => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.dword_var), .little);
-//         },
-//         .mem_address => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.mem_address), .little);
-//         },
-//         .string => {
-//             try writer.writeInt(i8, meta_byte, .little);
-//             try writer.writeInt(u16, @intCast(arg.string), .little);
-//         },
-//     }
-// }
+const AddressStub = struct {
+    location: usize,
+    dest: Dest,
+
+    const Dest = union(enum) {
+        block: usize,
+        init_segment: usize,
+    };
+};
+
+pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator, writer: anytype) !void {
+    var binary = std.ArrayList(u8).init(allocator);
+    defer binary.deinit();
+
+    const w = binary.writer();
+
+    var string_bytes = std.ArrayList(u8).init(allocator);
+    defer string_bytes.deinit();
+
+    var address_stubs = std.ArrayList(AddressStub).init(allocator);
+    defer address_stubs.deinit();
+
+    for (&self.header) |block_index| {
+        try w.writeInt(u16, 0x0101, .little);
+        try address_stubs.append(.{
+            .location = binary.items.len,
+            .dest = .{ .block = block_index },
+        });
+        try w.writeInt(u16, stub_address, .little);
+    }
+
+    var block_addresses = try std.ArrayList(u16).initCapacity(allocator, self.blocks.len);
+    defer block_addresses.deinit();
+    var init_segment_addresses = try std.ArrayList(u16).initCapacity(allocator, self.init_segments.len);
+    defer init_segment_addresses.deinit();
+
+    for (self.blocks) |block| {
+        block_addresses.appendAssumeCapacity(@intCast(binary.items.len + ecl_base));
+        for (self.getBlockCommands(block)) |command| {
+            try w.writeByte(@intFromEnum(command.tag));
+            for (self.getCommandArgs(command)) |arg| {
+                try writeArgBinary(arg, &binary, self.vars, &address_stubs, &string_bytes);
+            }
+        }
+    }
+
+    for (self.init_segments) |segment| {
+        init_segment_addresses.appendAssumeCapacity(@intCast(binary.items.len + ecl_base));
+        try w.writeAll(segment.bytes);
+    }
+
+    std.debug.assert(block_addresses.items.len == self.blocks.len);
+    std.debug.assert(init_segment_addresses.items.len == self.init_segments.len);
+    var binary_fbs = std.io.fixedBufferStream(binary.items);
+    for (address_stubs.items) |stub_info| {
+        const address = switch (stub_info.dest) {
+            .block => |index| block_addresses.items[index],
+            .init_segment => |index| init_segment_addresses.items[index],
+        };
+        try binary_fbs.seekTo(stub_info.location);
+        try binary_fbs.writer().writeInt(u16, address, .little);
+    }
+
+    if (binary.items.len % 2 == 1) {
+        try w.writeByte(0);
+    }
+
+    try writer.writeAll(binary.items);
+}
+
+fn writeArgBinary(arg: Arg, out_binary: *std.ArrayList(u8), vars: []const Var, address_stubs: *std.ArrayList(AddressStub), string_bytes: *std.ArrayList(u8)) !void {
+    const w = out_binary.writer();
+
+    switch (arg) {
+        .immediate => |val| {
+            if (std.math.cast(u8, val)) |cast_val| {
+                try w.writeByte(0);
+                try w.writeByte(cast_val);
+            } else if (std.math.cast(u16, val)) |cast_val| {
+                try w.writeByte(2);
+                try w.writeInt(u16, cast_val, .little);
+            } else {
+                try w.writeByte(4);
+                try w.writeInt(u32, val, .little);
+            }
+        },
+        .var_use => |var_index| {
+            const var_info = vars[var_index];
+            const meta_byte: u8 = switch (var_info.var_type) {
+                .byte => 1,
+                .word => 3,
+                .dword => 5,
+                .pointer => 0x81,
+            };
+            try w.writeByte(meta_byte);
+            try w.writeInt(u16, var_info.address, .little);
+        },
+        .ptr_deref => |deref_info| {
+            const var_info = vars[deref_info.ptr_var_id];
+            std.debug.assert(var_info.var_type == .pointer);
+            const meta_byte: u8 = switch (deref_info.deref_type) {
+                .byte => 1,
+                .word => 3,
+                .dword => 5,
+                .pointer => std.debug.panic("Encountered pointer dereference to pointer type\n", .{}),
+            };
+            try w.writeByte(meta_byte);
+            try w.writeInt(u16, @intCast(var_info.address + deref_info.offset), .little);
+        },
+        .string => |s| {
+            const string_offset: u16 = @intCast(string_bytes.items.len);
+            try string_bytes.appendSlice(s);
+            try string_bytes.append(0x00); // null terminator
+            try w.writeByte(0x80);
+            try w.writeInt(u16, string_offset, .little);
+        },
+        .jump_dest_block => |block_index| {
+            try w.writeByte(1);
+            try address_stubs.append(.{
+                .location = out_binary.items.len,
+                .dest = .{ .block = block_index },
+            });
+            try w.writeInt(u16, stub_address, .little);
+        },
+        .init_data_segment => |segment_index| {
+            try w.writeByte(1);
+            try address_stubs.append(.{
+                .location = out_binary.items.len,
+                .dest = .{ .init_segment = segment_index },
+            });
+            try w.writeInt(u16, stub_address, .little);
+        },
+    }
+}

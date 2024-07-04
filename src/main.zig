@@ -65,10 +65,12 @@ pub fn main() !void {
         defer parsed_ecl.deinit();
 
         try parsed_ecl.serializeText(stderr.writer());
-        // var bin = std.ArrayList(u8).init(allocator);
-        // defer bin.deinit();
-        // try parsed_ecl.serializeBinary(bin.writer());
-        // std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
+        if (level_id != 0x43) {
+            var bin = std.ArrayList(u8).init(allocator);
+            defer bin.deinit();
+            try parsed_ecl.serializeBinary(allocator, bin.writer());
+            std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin.items));
+        }
     }
 
     try stderr.flush();
