@@ -53,7 +53,7 @@ pub const Var = struct {
 
 pub const PtrDeref = struct {
     ptr_var_id: usize,
-    offset: usize,
+    offset: u16,
     deref_type: VarType,
 };
 
