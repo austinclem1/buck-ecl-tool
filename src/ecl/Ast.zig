@@ -78,7 +78,7 @@ pub fn serializeText(self: *const @This(), writer: anytype) !void {
             for (self.getCommandArgs(cmd)) |arg| {
                 switch (arg) {
                     .immediate => |val| {
-                        try writer.print(" {x}", .{val});
+                        try writer.print(" {d}", .{val});
                     },
                     .var_use => |index| {
                         try writer.print(" {s}", .{self.vars[index].name});
