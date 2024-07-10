@@ -109,7 +109,11 @@ pub fn serializeText(self: *const @This(), writer: anytype) !void {
     }
     for (self.init_segments) |segment| {
         try writer.print("{s}:\n", .{segment.name});
-        try writer.print("\t{s}\n", .{std.fmt.fmtSliceHexLower(segment.bytes)});
+        try writer.print("\tBYTES", .{});
+        for (segment.bytes) |b| {
+            try writer.print(" {d}", .{b});
+        }
+        try writer.print("\n", .{});
     }
 }
 
