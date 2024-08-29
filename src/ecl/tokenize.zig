@@ -20,6 +20,26 @@ pub const Token = union(enum) {
     at_sign,
     equals,
     eof,
+
+    pub fn toString(self: Token) []const u8 {
+        switch (self) {
+            .identifier => "identifier",
+            .number => "number literal",
+            .string => "string",
+            .command => "command",
+            .keyword_BYTES => "\"BYTES\"",
+            .keyword_b => "\"b\"",
+            .keyword_w => "\"w\"",
+            .keyword_d => "\"d\"",
+            .newline => "newline",
+            .colon => "\":\"",
+            .lsquare_bracket => "\"[\"",
+            .rsquare_bracket => "\"]\"",
+            .at_sign => "\"@\"",
+            .equals => "\"=\"",
+            .eof => "EOF",
+        }
+    }
 };
 
 const TokenSourcePair = struct {
