@@ -22,18 +22,23 @@ pub const Token = union(enum) {
     eof,
 };
 
+const TokenSourcePair = struct {
+    location: usize,
+    token: Token,
+};
+
 pub const TokenStream = struct {
-    tokens: []const Token,
-    pos: usize,
+    tokens: []const TokenSourcePair,
+    current: usize,
 
     pub fn next(self: *TokenStream) Token {
-        const tok = self.tokens[self.pos];
-        self.pos += 1;
+        const tok = self.tokens[self.current];
+        self.current += 1;
         return tok;
     }
 
     pub fn peek(self: *TokenStream) Token {
-        return self.tokens[self.pos];
+        return self.tokens[self.current];
     }
 
     pub fn free(self: *TokenStream, allocator: Allocator) void {
@@ -43,7 +48,7 @@ pub const TokenStream = struct {
 };
 
 pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFailed, OutOfMemory }!TokenStream {
-    var tokens = std.ArrayList(Token).init(allocator);
+    var tokens = std.ArrayList(TokenSourcePair).init(allocator);
     defer tokens.deinit();
 
     var pos: usize = 0;
@@ -52,15 +57,15 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
         switch (buffer[pos]) {
             'a'...'z', 'A'...'Z', '_' => {
                 const read, const tok = readIdentifierOrKeyword(buffer[pos..]);
+                try tokens.append(.{ .location = pos, .token = tok });
                 pos += read;
-                try tokens.append(tok);
             },
             '0'...'9' => {
                 var err_info: ?ReadNumberErrorInfo = null;
                 if (readNumber(buffer[pos..], &err_info)) |result| {
                     const read, const tok = result;
+                    try tokens.append(.{ .location = pos, .token = tok });
                     pos += read;
-                    try tokens.append(tok);
                 } else |err| switch (err) {
                     error.Overflow => {
                         std.debug.print("error: Number literal too large for max size of 32 bits (file offset {d})", .{pos});
@@ -74,35 +79,35 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
                 }
             },
             ':' => {
+                try tokens.append(.{ .location = pos, .token = .colon });
                 pos += 1;
-                try tokens.append(.colon);
             },
             '[' => {
+                try tokens.append(.{ .location = pos, .token = .lsquare_bracket });
                 pos += 1;
-                try tokens.append(.lsquare_bracket);
             },
             ']' => {
+                try tokens.append(.{ .location = pos, .token = .rsquare_bracket });
                 pos += 1;
-                try tokens.append(.rsquare_bracket);
             },
             '=' => {
+                try tokens.append(.{ .location = pos, .token = .equals });
                 pos += 1;
-                try tokens.append(.equals);
             },
             '@' => {
+                try tokens.append(.{ .location = pos, .token = .at_sign });
                 pos += 1;
-                try tokens.append(.at_sign);
             },
             ' ', '\t', '\r', '\n' => {
                 const read, const found_newline = eatWhitespace(buffer[pos..]);
+                if (found_newline) try tokens.append(.{ .location = pos, .token = .newline });
                 pos += read;
-                if (found_newline) try tokens.append(.newline);
             },
             '"' => {
                 if (readString(buffer[pos..])) |result| {
                     const read, const string = result;
+                    try tokens.append(.{ .location = pos, .token = .{ .string = string } });
                     pos += read;
-                    try tokens.append(.{ .string = string });
                 } else |err| switch (err) {
                     error.NoClosingQuote => {
                         std.debug.print("error: No matching quote found for string starting at byte {d}", .{pos});
@@ -117,11 +122,13 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
         }
     }
 
-    try tokens.append(.eof);
+    std.debug.assert(pos == buffer.len);
+
+    try tokens.append(.{ .location = pos, .token = .eof });
 
     return TokenStream{
         .tokens = try tokens.toOwnedSlice(),
-        .pos = 0,
+        .current = 0,
     };
 }
 
