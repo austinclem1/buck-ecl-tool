@@ -31,13 +31,13 @@ pub const TokenStream = struct {
     tokens: []const TokenSourcePair,
     current: usize,
 
-    pub fn next(self: *TokenStream) Token {
+    pub fn next(self: *TokenStream) TokenSourcePair {
         const tok = self.tokens[self.current];
         self.current += 1;
         return tok;
     }
 
-    pub fn peek(self: *TokenStream) Token {
+    pub fn peek(self: *TokenStream) TokenSourcePair {
         return self.tokens[self.current];
     }
 
