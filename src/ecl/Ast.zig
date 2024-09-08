@@ -73,14 +73,7 @@ pub fn serializeText(self: *const @This(), writer: anytype) !void {
 
     try writer.print("\n", .{});
     for (self.vars) |v| {
-        switch (v.var_type) {
-            .byte, .word, .dword => {
-                try writer.print("{s}: {s} @ 0x{x}\n", .{ v.name, @tagName(v.var_type), v.address });
-            },
-            .pointer => {
-                try writer.print("{s}: pointer = 0x{x}\n", .{ v.name, v.address });
-            },
-        }
+        try writer.print("var {s}: {s} @ 0x{x}\n", .{ v.name, @tagName(v.var_type), v.address });
     }
     try writer.print("\n", .{});
 
