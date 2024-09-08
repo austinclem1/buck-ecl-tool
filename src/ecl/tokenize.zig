@@ -4,33 +4,50 @@ const Allocator = std.mem.Allocator;
 
 const CommandTag = @import("CommandTag.zig").Tag;
 
-pub const Token = union(enum) {
-    identifier: []const u8,
-    number: u32,
-    string: []const u8,
-    command: CommandTag,
-    keyword_BYTES,
-    keyword_b,
-    keyword_w,
-    keyword_d,
-    newline,
-    colon,
-    lsquare_bracket,
-    rsquare_bracket,
-    at_sign,
-    equals,
-    eof,
+pub const Token = struct {
+    location: usize,
+    variant: Variant,
 
-    pub fn toString(self: Token) []const u8 {
-        switch (self) {
+    pub const Variant = union(enum) {
+        identifier: []const u8,
+        number: u32,
+        string: []const u8,
+        command: CommandTag,
+        keyword_BYTES,
+        keyword_byte,
+        keyword_word,
+        keyword_dword,
+        keyword_pointer,
+        keyword_b,
+        keyword_w,
+        keyword_d,
+        keyword_header,
+        keyword_var,
+        newline,
+        colon,
+        lsquare_bracket,
+        rsquare_bracket,
+        at_sign,
+        equals,
+        eof,
+    };
+
+    pub fn toString(tag: std.meta.Tag(Variant)) []const u8 {
+        return switch (tag) {
             .identifier => "identifier",
             .number => "number literal",
             .string => "string",
             .command => "command",
             .keyword_BYTES => "\"BYTES\"",
+            .keyword_byte => "\"byte\"",
+            .keyword_word => "\"word\"",
+            .keyword_dword => "\"dword\"",
+            .keyword_pointer => "\"pointer\"",
             .keyword_b => "\"b\"",
             .keyword_w => "\"w\"",
             .keyword_d => "\"d\"",
+            .keyword_header => "\"header\"",
+            .keyword_var => "\"var\"",
             .newline => "newline",
             .colon => "\":\"",
             .lsquare_bracket => "\"[\"",
@@ -38,27 +55,32 @@ pub const Token = union(enum) {
             .at_sign => "\"@\"",
             .equals => "\"=\"",
             .eof => "EOF",
-        }
+        };
     }
 };
 
-const TokenSourcePair = struct {
-    location: usize,
-    token: Token,
-};
-
 pub const TokenStream = struct {
-    tokens: []const TokenSourcePair,
+    tokens: []const Token,
     current: usize,
 
-    pub fn next(self: *TokenStream) TokenSourcePair {
+    pub fn next(self: *TokenStream) Token {
         const tok = self.tokens[self.current];
         self.current += 1;
         return tok;
     }
 
-    pub fn peek(self: *TokenStream) TokenSourcePair {
+    pub fn peek(self: *TokenStream) Token {
         return self.tokens[self.current];
+    }
+
+    pub fn peekTwo(self: *TokenStream) Token {
+        return self.tokens[self.current + 1];
+    }
+
+    pub fn eatAny(self: *TokenStream, to_eat: std.meta.Tag(Token.Variant)) void {
+        while (self.current < self.tokens.len) : (self.current += 1) {
+            if (std.meta.activeTag(self.tokens[self.current].variant) != to_eat) return;
+        }
     }
 
     pub fn free(self: *TokenStream, allocator: Allocator) void {
@@ -68,7 +90,7 @@ pub const TokenStream = struct {
 };
 
 pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFailed, OutOfMemory }!TokenStream {
-    var tokens = std.ArrayList(TokenSourcePair).init(allocator);
+    var tokens = std.ArrayList(Token).init(allocator);
     defer tokens.deinit();
 
     var pos: usize = 0;
@@ -77,14 +99,14 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
         switch (buffer[pos]) {
             'a'...'z', 'A'...'Z', '_' => {
                 const read, const tok = readIdentifierOrKeyword(buffer[pos..]);
-                try tokens.append(.{ .location = pos, .token = tok });
+                try tokens.append(.{ .location = pos, .variant = tok });
                 pos += read;
             },
             '0'...'9' => {
                 var err_info: ?ReadNumberErrorInfo = null;
                 if (readNumber(buffer[pos..], &err_info)) |result| {
                     const read, const tok = result;
-                    try tokens.append(.{ .location = pos, .token = tok });
+                    try tokens.append(.{ .location = pos, .variant = tok });
                     pos += read;
                 } else |err| switch (err) {
                     error.Overflow => {
@@ -99,34 +121,34 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
                 }
             },
             ':' => {
-                try tokens.append(.{ .location = pos, .token = .colon });
+                try tokens.append(.{ .location = pos, .variant = .colon });
                 pos += 1;
             },
             '[' => {
-                try tokens.append(.{ .location = pos, .token = .lsquare_bracket });
+                try tokens.append(.{ .location = pos, .variant = .lsquare_bracket });
                 pos += 1;
             },
             ']' => {
-                try tokens.append(.{ .location = pos, .token = .rsquare_bracket });
+                try tokens.append(.{ .location = pos, .variant = .rsquare_bracket });
                 pos += 1;
             },
             '=' => {
-                try tokens.append(.{ .location = pos, .token = .equals });
+                try tokens.append(.{ .location = pos, .variant = .equals });
                 pos += 1;
             },
             '@' => {
-                try tokens.append(.{ .location = pos, .token = .at_sign });
+                try tokens.append(.{ .location = pos, .variant = .at_sign });
                 pos += 1;
             },
             ' ', '\t', '\r', '\n' => {
                 const read, const found_newline = eatWhitespace(buffer[pos..]);
-                if (found_newline) try tokens.append(.{ .location = pos, .token = .newline });
+                if (found_newline) try tokens.append(.{ .location = pos, .variant = .newline });
                 pos += read;
             },
             '"' => {
                 if (readString(buffer[pos..])) |result| {
                     const read, const string = result;
-                    try tokens.append(.{ .location = pos, .token = .{ .string = string } });
+                    try tokens.append(.{ .location = pos, .variant = .{ .string = string } });
                     pos += read;
                 } else |err| switch (err) {
                     error.NoClosingQuote => {
@@ -144,7 +166,7 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
 
     std.debug.assert(pos == buffer.len);
 
-    try tokens.append(.{ .location = pos, .token = .eof });
+    try tokens.append(.{ .location = pos, .variant = .eof });
 
     return TokenStream{
         .tokens = try tokens.toOwnedSlice(),
@@ -152,7 +174,7 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
     };
 }
 
-fn readIdentifierOrKeyword(buffer: []const u8) struct { usize, Token } {
+fn readIdentifierOrKeyword(buffer: []const u8) struct { usize, Token.Variant } {
     var pos: usize = 0;
     while (pos < buffer.len) : (pos += 1) {
         switch (buffer[pos]) {
@@ -165,11 +187,11 @@ fn readIdentifierOrKeyword(buffer: []const u8) struct { usize, Token } {
 
     const tok = blk: {
         if (command_tag_map.get(str)) |command_tag| {
-            break :blk Token{ .command = command_tag };
+            break :blk Token.Variant{ .command = command_tag };
         } else if (keyword_map.get(str)) |keyword_tok| {
             break :blk keyword_tok;
         } else {
-            break :blk Token{ .identifier = str }; // should we dupe this?
+            break :blk Token.Variant{ .identifier = str }; // should we dupe this?
         }
     };
 
@@ -185,7 +207,7 @@ const ReadNumberError = error{
     Overflow,
 };
 
-fn readNumber(buffer: []const u8, err_info_out: *?ReadNumberErrorInfo) ReadNumberError!struct { usize, Token } {
+fn readNumber(buffer: []const u8, err_info_out: *?ReadNumberErrorInfo) ReadNumberError!struct { usize, Token.Variant } {
     var pos: usize = 0;
 
     var radix: u32 = 10;
@@ -280,9 +302,15 @@ const command_tag_map_kvs = blk: {
     break :blk result;
 };
 
-const keyword_map = std.ComptimeStringMap(Token, .{
+const keyword_map = std.ComptimeStringMap(Token.Variant, .{
     .{ "BYTES", .keyword_BYTES },
+    .{ "byte", .keyword_byte },
+    .{ "word", .keyword_word },
+    .{ "dword", .keyword_dword },
+    .{ "pointer", .keyword_pointer },
     .{ "b", .keyword_b },
     .{ "w", .keyword_w },
     .{ "d", .keyword_d },
+    .{ "header", .keyword_header },
+    .{ "var", .keyword_var },
 });
