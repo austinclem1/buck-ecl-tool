@@ -73,8 +73,8 @@ pub const TokenStream = struct {
         return self.tokens[self.current];
     }
 
-    pub fn peekTwo(self: *TokenStream) Token {
-        return self.tokens[self.current + 1];
+    pub fn peekN(self: *TokenStream, n: usize) Token {
+        return self.tokens[self.current + n];
     }
 
     pub fn eatAny(self: *TokenStream, to_eat: std.meta.Tag(Token.Variant)) void {

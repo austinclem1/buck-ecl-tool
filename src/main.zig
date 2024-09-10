@@ -10,6 +10,8 @@ const GPA = std.heap.GeneralPurposeAllocator(.{});
 const ecl_base: u16 = 0x6af6;
 const memdump_path = "salvation.dmp";
 
+const tokenize = @import("ecl/tokenize.zig");
+
 pub fn main() !void {
     var stderr = std.io.bufferedWriter(std.io.getStdErr().writer());
 
@@ -17,7 +19,38 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     var allocator = gpa.allocator();
 
-    for (level_ids) |level_id| {
+    var ecl_dir = try std.fs.cwd().openDir("ecl_out", .{ .iterate = true });
+    defer ecl_dir.close();
+    var it = ecl_dir.iterate();
+    var done_first = false;
+    while (try it.next()) |entry| : (done_first = true) {
+        if (done_first) break;
+        const filename = switch (entry.kind) {
+            .file => entry.name,
+            else => continue,
+        };
+        var test_text = try ecl_dir.openFile(filename, .{});
+        defer test_text.close();
+        const test_text_bytes = try test_text.readToEndAlloc(allocator, 1024 * 1024);
+        defer allocator.free(test_text_bytes);
+        var parser = ecl.TextParser.init(allocator);
+        defer parser.deinit();
+        var ast = try parser.parse(test_text_bytes);
+        defer ast.deinit();
+        var token_stream = try tokenize.tokenize(allocator, test_text_bytes);
+        defer token_stream.free(allocator);
+        for (token_stream.tokens) |tok| {
+            std.debug.print("{d}\t", .{tok.location});
+            switch (tok.variant) {
+                .string => |str| std.debug.print("string \"{s}\"\n", .{str}),
+                .identifier => |str| std.debug.print("identifier: \"{s}\"\n", .{str}),
+                else => std.debug.print("{any}\n", .{tok}),
+            }
+        }
+        try ast.serializeText(stderr.writer());
+    }
+
+    for (level_ids[0..0]) |level_id| {
         // we skip 0x61 because there might be a bug in the game or this particular rom dump
         // where an END code isn't found, so it just keeps decompressing subsequent data from later levels'
         // text
@@ -56,16 +89,27 @@ pub fn main() !void {
         const text = try decoder.decompressAlloc(allocator, rom_file.reader());
         defer allocator.free(text);
 
-        const text_base: u16 = @intCast(ecl_base + adjusted_len_script.len);
+        // const text_base: u16 = @intCast(ecl_base + adjusted_len_script.len);
 
-        try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
-        try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
+        // try stderr.writer().print("script: {x} - {x}\n", .{ ecl_base, ecl_base + adjusted_len_script.len });
+        // try stderr.writer().print("text: {x} - {x}\n", .{ text_base, text_base + text.len });
 
         const initial_highest_known_command_address: ?u16 = if (level_id == 0x60) 0x907 + 0x6af6 else null;
         var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_script, text, initial_highest_known_command_address);
         defer parsed_ecl.deinit();
 
-        try parsed_ecl.serializeText(stderr.writer());
+        {
+            var out_dir = try std.fs.cwd().makeOpenPath("ecl_out", .{});
+            defer out_dir.close();
+
+            const filename = try std.fmt.allocPrint(allocator, "{d}.ecl", .{level_id});
+            defer allocator.free(filename);
+
+            var f = try out_dir.createFile(filename, .{});
+            defer f.close();
+
+            try parsed_ecl.serializeText(f.writer());
+        }
         if (level_id != 0x43) {
             const bin_result = try parsed_ecl.serializeBinary(allocator);
             defer allocator.free(bin_result.script);

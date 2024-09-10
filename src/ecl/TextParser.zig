@@ -14,36 +14,31 @@ const VarType = @import("VarType.zig").VarType;
 const IndexSlice = @import("../IndexSlice.zig");
 
 allocator: Allocator,
-ast_arena: std.heap.ArenaAllocator,
 state: State,
-state_stack: std.BoundedArray(State, 16),
-labels_set: std.StringArrayHashMap(void), // index of each label is associated block index
-blocks: std.ArrayList(Ast.Block),
+blocks: std.StringArrayHashMap(IndexSlice),
 commands: std.ArrayList(Ast.Command),
 args: std.ArrayList(Arg),
 vars: std.StringArrayHashMap(VarInfo),
+init_segments: std.StringArrayHashMap([]const u8),
 
 pub fn init(allocator: Allocator) TextParser {
     return .{
         .allocator = allocator,
-        .ast_arena = std.heap.ArenaAllocator.init(allocator),
         .state = .start,
-        .state_stack = std.BoundedArray(State, 16).init(0) catch unreachable,
-        .labels_set = std.StringArrayHashMap(void).init(allocator),
-        .blocks = std.ArrayList(Ast.Block).init(allocator),
+        .blocks = std.StringArrayHashMap(IndexSlice).init(allocator),
         .commands = std.ArrayList(Ast.Command).init(allocator),
         .args = std.ArrayList(Arg).init(allocator),
         .vars = std.StringArrayHashMap(VarInfo).init(allocator),
+        .init_segments = std.StringArrayHashMap([]const u8).init(allocator),
     };
 }
 
 pub fn deinit(self: *TextParser) void {
-    // self.ast_arena intentionally not freed here, the resulting AST owns it
-    self.labels_set.deinit();
     self.blocks.deinit();
     self.commands.deinit();
     self.args.deinit();
     self.vars.deinit();
+    self.init_segments.deinit();
 
     self.* = undefined;
 }
@@ -58,10 +53,15 @@ const State = enum {
 };
 
 pub fn parse(self: *TextParser, text: []const u8) !Ast {
+    var ast_arena = std.heap.ArenaAllocator.init(self.allocator);
+    errdefer ast_arena.deinit();
+
     var token_stream = try tokenize.tokenize(self.allocator, text);
     defer token_stream.free(self.allocator);
 
     var header_strings: ?[5][]const u8 = null;
+    var in_progress_label: ?[]const u8 = null;
+    var block_commands_start: usize = 0;
 
     while (true) {
         switch (self.state) {
@@ -87,15 +87,21 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                     },
                     .identifier => {
                         const label_str = try parseLabel(&token_stream);
-                        if (self.labels_set.contains(label_str)) {
+                        if (self.blocks.contains(label_str)) {
                             std.debug.print("error: Redeclaration of label {s} at byte {d}\n", .{ label_str, tok.location });
                             return error.ParsingFailed;
                         }
-                        const duped_label_str = try self.ast_arena.allocator().dupe(u8, label_str);
-                        try self.labels_set.putNoClobber(duped_label_str, {});
+                        if (self.init_segments.contains(label_str)) {
+                            std.debug.print("error: Redeclaration of label {s} at byte {d}\n", .{ label_str, tok.location });
+                            return error.ParsingFailed;
+                        }
+                        in_progress_label = label_str;
                         self.state = .parsing_new_block;
                     },
                     .newline => _ = token_stream.next(),
+                    .eof => {
+                        self.state = .done;
+                    },
                     else => {
                         std.debug.print("error: Expected header or label definition, found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
                         return error.ParsingFailed;
@@ -106,7 +112,10 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                 const tok = token_stream.peek();
                 switch (tok.variant) {
                     .newline => _ = token_stream.next(),
-                    .command => self.state = .parsing_command_block,
+                    .command => {
+                        block_commands_start = self.commands.items.len;
+                        self.state = .parsing_command_block;
+                    },
                     .keyword_BYTES => self.state = .parsing_bytes_block,
                     else => {
                         std.debug.print("error: Expected command or \"BYTES\", found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
@@ -119,25 +128,135 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                 switch (tok.variant) {
                     .newline => _ = token_stream.next(),
                     .command => try self.parseCommand(&token_stream),
-                    .keyword_BYTES => self.state = .parsing_bytes_block,
-                    .identifier => self.state = .start,
-                    .eof => self.state = .done,
+                    .identifier, .eof => {
+                        try self.blocks.putNoClobber(in_progress_label.?, IndexSlice{
+                            .start = block_commands_start,
+                            .stop = self.commands.items.len,
+                        });
+                        in_progress_label = null;
+                        self.state = switch (tok.variant) {
+                            .identifier => .start,
+                            .eof => .done,
+                            else => unreachable,
+                        };
+                    },
                     else => {
-                        std.debug.print("error: Expected command or \"BYTES\", found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
+                        std.debug.print("error: Expected command, found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
+                        return error.ParsingFailed;
+                    },
+                }
+            },
+            .parsing_bytes_block => {
+                const tok = token_stream.peek();
+                switch (tok.variant) {
+                    .newline => _ = token_stream.next(),
+                    .keyword_BYTES => {
+                        const duped_bytes = try parseBytes(ast_arena.allocator(), &token_stream);
+                        try self.init_segments.putNoClobber(in_progress_label.?, duped_bytes);
+                        in_progress_label = null;
+                    },
+                    else => {
+                        std.debug.print("error: Expected \"BYTES\", found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
                         return error.ParsingFailed;
                     },
                 }
             },
             else => @panic("TODO"),
         }
-        // switch (tok) {
-        //     .identifier => |str| std.debug.print("identifier: {s}\n", .{str}),
-        //     .string => |str| std.debug.print("string: \"{s}\"\n", .{str}),
-        //     else => std.debug.print("{any}\n", .{tok}),
-        // }
     }
 
-    return undefined;
+    var ast_header: [5]usize = undefined;
+    if (header_strings) |strings| {
+        for (strings, 0..) |str, i| {
+            ast_header[i] = self.blocks.getIndex(str) orelse {
+                std.debug.print("error: no definition found for header label \"{s}\"\n", .{str});
+                return error.ParsingFailed;
+            };
+        }
+    } else {
+        std.debug.print("error: header never defined\n", .{});
+        return error.ParsingFailed;
+    }
+
+    const ast_blocks = try ast_arena.allocator().alloc(Ast.Block, self.blocks.count());
+    for (ast_blocks, 0..) |*dest, i| {
+        const duped_label = try ast_arena.allocator().dupe(u8, self.blocks.keys()[i]);
+        dest.* = Ast.Block{
+            .label = duped_label,
+            .commands = self.blocks.values()[i],
+        };
+    }
+
+    const ast_commands = try ast_arena.allocator().dupe(Ast.Command, self.commands.items);
+
+    const ast_args = try ast_arena.allocator().alloc(Ast.Arg, self.args.items.len);
+    for (ast_args, 0..) |*dest, i| {
+        dest.* = switch (self.args.items[i]) {
+            .immediate => |val| Ast.Arg{ .immediate = val },
+            .var_or_label => |str| blk: {
+                if (self.vars.getIndex(str)) |var_index| {
+                    break :blk Ast.Arg{ .var_use = var_index };
+                }
+                if (self.blocks.getIndex(str)) |block_index| {
+                    break :blk Ast.Arg{ .jump_dest_block = block_index };
+                }
+                if (self.init_segments.getIndex(str)) |segment_index| {
+                    break :blk Ast.Arg{ .init_data_segment = segment_index };
+                }
+                std.debug.print("error: identifier \"{s}\" not associated with a variable, label, or bytes segment\n", .{str});
+                return error.ParsingFailed;
+            },
+            .ptr_deref => |deref_info| blk: {
+                const var_index = self.vars.getIndex(deref_info.var_name) orelse {
+                    std.debug.print("error: variable \"{s}\" never declared\n", .{deref_info.var_name});
+                    return error.ParsingFailed;
+                };
+                const offset = std.math.cast(u16, deref_info.offset) orelse {
+                    std.debug.print("error: offset of {d} for pointer deref of \"{s}\" too large (must fit in u16)\n", .{ deref_info.offset, deref_info.var_name });
+                    return error.ParsingFailed;
+                };
+                break :blk Ast.Arg{ .ptr_deref = .{
+                    .ptr_var_id = var_index,
+                    .offset = offset,
+                    .deref_type = deref_info.deref_type,
+                } };
+            },
+            .string => |str| blk: {
+                const duped = try ast_arena.allocator().dupe(u8, str);
+                break :blk Ast.Arg{ .string = duped };
+            },
+        };
+    }
+
+    const ast_init_segments = try ast_arena.allocator().alloc(Ast.InitSegment, self.init_segments.count());
+    for (ast_init_segments, 0..) |*dest, i| {
+        const duped_name = try ast_arena.allocator().dupe(u8, self.init_segments.keys()[i]);
+        const duped_bytes = try ast_arena.allocator().dupe(u8, self.init_segments.values()[i]);
+        dest.* = Ast.InitSegment{
+            .name = duped_name,
+            .bytes = duped_bytes,
+        };
+    }
+
+    const ast_vars = try ast_arena.allocator().alloc(Ast.Var, self.vars.count());
+    for (ast_vars, 0..) |*dest, i| {
+        const duped_name = try ast_arena.allocator().dupe(u8, self.vars.keys()[i]);
+        dest.* = Ast.Var{
+            .name = duped_name,
+            .address = self.vars.values()[i].address,
+            .var_type = self.vars.values()[i].var_type,
+        };
+    }
+
+    return Ast{
+        .header = ast_header,
+        .blocks = ast_blocks,
+        .commands = ast_commands,
+        .args = ast_args,
+        .init_segments = ast_init_segments,
+        .vars = ast_vars,
+        .arena = ast_arena,
+    };
 }
 
 const ParseError = error{
@@ -261,7 +380,7 @@ fn maybeParseCommandArg(token_stream: *TokenStream) ParseError!?Arg {
             return Arg{ .string = str.variant.string };
         },
         .identifier => {
-            if (token_stream.peekTwo().variant == .lsquare_bracket) {
+            if (token_stream.peekN(1).variant == .lsquare_bracket) {
                 return try parsePtrDeref(token_stream);
             } else {
                 const ident = token_stream.next();
@@ -273,6 +392,39 @@ fn maybeParseCommandArg(token_stream: *TokenStream) ParseError!?Arg {
             return error.ParsingFailed;
         },
     }
+}
+
+fn parseBytes(allocator: Allocator, token_stream: *TokenStream) (ParseError || error{OutOfMemory})![]const u8 {
+    const keyword_tok = try expect(token_stream, .keyword_BYTES);
+
+    var bytes_count: usize = 0;
+    while (token_stream.peekN(bytes_count).variant == .number) : (bytes_count += 1) {}
+
+    if (bytes_count == 0) {
+        std.debug.print("error: expected number literal after \"BYTES\" at {d}\n", .{keyword_tok.location});
+        return error.ParsingFailed;
+    }
+
+    const result = try allocator.alloc(u8, bytes_count);
+    for (result) |*dest| {
+        const num_tok = token_stream.next();
+        const val = std.math.cast(u8, num_tok.variant.number) orelse {
+            std.debug.print("error: BYTES arg {d} at {d} must fit within a u8\n", .{ num_tok.variant.number, num_tok.location });
+            return error.ParsingFailed;
+        };
+        dest.* = val;
+    }
+
+    const end_tok = token_stream.next();
+    switch (end_tok.variant) {
+        .newline, .eof => {},
+        else => {
+            std.debug.print("error: expected newline or EOF at {d} after BYTES line\n", .{end_tok.location});
+            return error.ParsingFailed;
+        },
+    }
+
+    return result;
 }
 
 const Arg = union(enum) {
