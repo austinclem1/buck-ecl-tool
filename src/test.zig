@@ -2,7 +2,9 @@ const std = @import("std");
 
 const ecl = @import("ecl.zig");
 
-const GPA = std.heap.GeneralPurposeAllocator;
+const LzwDecoder = @import("LzwDecoder.zig");
+
+const GPA = std.heap.GeneralPurposeAllocator(.{});
 
 pub fn runTest() !void {
     var gpa = GPA{};
@@ -24,7 +26,7 @@ pub fn runTest() !void {
         const compressed_script_addr = try ecl.getCompressedScriptAddress(rom_file, level_id);
         const compressed_text_addr = try ecl.getCompressedTextAddress(rom_file, level_id);
 
-        var decoder = try ecl.LzwDecoder.init(allocator);
+        var decoder = try LzwDecoder.init(allocator);
         defer decoder.deinit();
 
         try rom_file.seekTo(compressed_script_addr);
@@ -48,6 +50,13 @@ pub fn runTest() !void {
         var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_bin_script, bin_text, initial_highest_known_command_address);
         defer parsed_ecl.deinit();
 
+        if (level_id != 0x43) {
+            const serialized_binary = try parsed_ecl.serializeBinary(allocator);
+            defer allocator.free(serialized_binary.script);
+            defer allocator.free(serialized_binary.text);
+            std.debug.assert(std.mem.eql(u8, adjusted_len_bin_script, serialized_binary.script));
+            std.debug.assert(std.mem.eql(u8, bin_text, serialized_binary.text));
+        }
         {
             var ast_text = std.ArrayList(u8).init(allocator);
             defer ast_text.deinit();
@@ -65,25 +74,5 @@ pub fn runTest() !void {
 
             std.debug.assert(std.mem.eql(u8, ast_text.items, reserialized_ast_text.items));
         }
-
-        // {
-        //     var out_dir = try std.fs.cwd().makeOpenPath("ecl_out", .{});
-        //     defer out_dir.close();
-        //
-        //     const filename = try std.fmt.allocPrint(allocator, "{d}.ecl", .{level_id});
-        //     defer allocator.free(filename);
-        //
-        //     var f = try out_dir.createFile(filename, .{});
-        //     defer f.close();
-        //
-        //     try parsed_ecl.serializeText(f.writer());
-        // }
-        // if (level_id != 0x43) {
-        //     const bin_result = try parsed_ecl.serializeBinary(allocator);
-        //     defer allocator.free(bin_result.script);
-        //     defer allocator.free(bin_result.text);
-        //     std.debug.assert(std.mem.eql(u8, adjusted_len_script, bin_result.script));
-        //     std.debug.assert(std.mem.eql(u8, text, bin_result.text));
-        // }
     }
 }
