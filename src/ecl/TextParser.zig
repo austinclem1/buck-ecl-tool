@@ -155,6 +155,8 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                         try self.init_segments.putNoClobber(in_progress_label.?, duped_bytes);
                         in_progress_label = null;
                     },
+                    .identifier => self.state = .start,
+                    .eof => self.state = .done,
                     else => {
                         std.debug.print("error: Expected \"BYTES\", found {s} at byte {d}\n", .{ @tagName(tok.variant), tok.location });
                         return error.ParsingFailed;
