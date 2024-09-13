@@ -4,7 +4,7 @@ const ArrayList = std.ArrayList;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const MultiArrayList = std.MultiArrayList;
 
-pub const LzwDecoder = @This();
+pub const Decoder = @This();
 
 allocator: Allocator,
 bit_buffer: u32,
@@ -34,7 +34,7 @@ const DictEntry = struct {
     suffix: u8,
 };
 
-pub fn init(allocator: Allocator) Allocator.Error!LzwDecoder {
+pub fn init(allocator: Allocator) Allocator.Error!Decoder {
     var dict = MultiArrayList(DictEntry){};
     errdefer dict.deinit(allocator);
 
@@ -47,7 +47,7 @@ pub fn init(allocator: Allocator) Allocator.Error!LzwDecoder {
     dict.appendAssumeCapacity(.{ .prefix = prefix_end_sentinal, .suffix = 0 });
     dict.appendAssumeCapacity(.{ .prefix = prefix_end_sentinal, .suffix = 0 });
 
-    return LzwDecoder{
+    return Decoder{
         .allocator = allocator,
         .bit_buffer = 0,
         .bit_buffer_open_bits = bit_buffer_capacity,
@@ -57,13 +57,13 @@ pub fn init(allocator: Allocator) Allocator.Error!LzwDecoder {
     };
 }
 
-pub fn deinit(self: *LzwDecoder) void {
+pub fn deinit(self: *Decoder) void {
     self.dict.deinit(self.allocator);
     self.decoding_scratch_space.deinit(self.allocator);
     self.* = undefined;
 }
 
-pub fn resetClearingCapacity(self: *LzwDecoder) void {
+pub fn resetClearingCapacity(self: *Decoder) void {
     self.bit_buffer = 0;
     self.bit_buffer_open_bits = bit_buffer_capacity;
     self.dict.shrinkAndFree(self.allocator, dict_initial_len);
@@ -71,7 +71,7 @@ pub fn resetClearingCapacity(self: *LzwDecoder) void {
     self.cur_code_width = initial_code_width;
 }
 
-pub fn resetRetainingCapacity(self: *LzwDecoder) void {
+pub fn resetRetainingCapacity(self: *Decoder) void {
     self.bit_buffer = 0;
     self.bit_buffer_open_bits = bit_buffer_capacity;
     self.dict.shrinkRetainingCapacity(dict_initial_len);
@@ -79,7 +79,7 @@ pub fn resetRetainingCapacity(self: *LzwDecoder) void {
     self.cur_code_width = initial_code_width;
 }
 
-pub fn decompressAlloc(self: *LzwDecoder, result_allocator: Allocator, reader: anytype) ![]u8 {
+pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anytype) ![]u8 {
     var out_buffer = ArrayList(u8).init(result_allocator);
     errdefer out_buffer.deinit();
 
@@ -130,7 +130,7 @@ pub fn decompressAlloc(self: *LzwDecoder, result_allocator: Allocator, reader: a
     return try out_buffer.toOwnedSlice();
 }
 
-pub fn decodeCode(self: *LzwDecoder, code: u16, last_code: u16) (Allocator.Error || error{ReachedPrefixLengthLimit})!void {
+pub fn decodeCode(self: *Decoder, code: u16, last_code: u16) (Allocator.Error || error{ReachedPrefixLengthLimit})!void {
     // this can the length of the dictionary, indexing the entry that's about to be created
     std.debug.assert(code <= self.dict.len);
     var cur_node: u16 = blk: {
@@ -155,7 +155,7 @@ pub fn decodeCode(self: *LzwDecoder, code: u16, last_code: u16) (Allocator.Error
     }
 }
 
-fn readCode(self: *LzwDecoder, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!u16 {
+fn readCode(self: *Decoder, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!u16 {
     // read bytes until bit_buffer is too full to add any more
     while (self.bit_buffer_open_bits >= 8) {
         const new_byte = try reader.readByte();
@@ -200,7 +200,7 @@ fn readCode(self: *LzwDecoder, reader: anytype) (@TypeOf(reader).Error || error{
     return code;
 }
 
-fn debugPrintDict(self: *const LzwDecoder) void {
+fn debugPrintDict(self: *const Decoder) void {
     var stack = ArrayList(u8).init(self.allocator);
     defer stack.deinit();
     for (0x102..self.dict.len) |i| {

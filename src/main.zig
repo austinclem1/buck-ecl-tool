@@ -3,7 +3,7 @@ const std = @import("std");
 const File = std.fs.File;
 
 const ecl = @import("ecl.zig");
-const LzwDecoder = @import("LzwDecoder.zig");
+const lzw = @import("lzw.zig");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
 

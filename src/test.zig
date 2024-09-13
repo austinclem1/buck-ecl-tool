@@ -2,7 +2,7 @@ const std = @import("std");
 
 const ecl = @import("ecl.zig");
 
-const LzwDecoder = @import("LzwDecoder.zig");
+const lzw = @import("lzw.zig");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
 
@@ -26,7 +26,7 @@ pub fn runTest() !void {
         const compressed_script_addr = try ecl.getCompressedScriptAddress(rom_file, level_id);
         const compressed_text_addr = try ecl.getCompressedTextAddress(rom_file, level_id);
 
-        var decoder = try LzwDecoder.init(allocator);
+        var decoder = try lzw.Decoder.init(allocator);
         defer decoder.deinit();
 
         try rom_file.seekTo(compressed_script_addr);
