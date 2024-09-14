@@ -23,15 +23,17 @@ pub fn runTest() !void {
         // significant to finding the rom address of the compressed level data
         if (level_id == 0x61) continue;
 
-        const compressed_script_addr = try ecl.getCompressedScriptAddress(rom_file, level_id);
-        const compressed_text_addr = try ecl.getCompressedTextAddress(rom_file, level_id);
+        const compressed_script = try ecl.fileReadCompressedScriptAlloc(allocator, rom_file, level_id);
+        defer allocator.free(compressed_script);
+
+        const compressed_text = try ecl.fileReadCompressedTextAlloc(allocator, rom_file, level_id);
+        defer allocator.free(compressed_text);
 
         var decoder = try lzw.Decoder.init(allocator);
         defer decoder.deinit();
 
-        try rom_file.seekTo(compressed_script_addr);
-
-        const bin_script = try decoder.decompressAlloc(allocator, rom_file.reader());
+        var script_fbs = std.io.fixedBufferStream(compressed_script);
+        const bin_script = try decoder.decompressAlloc(allocator, script_fbs.reader());
         defer allocator.free(bin_script);
 
         // In the game, when the decompressed output length is odd, the returned length is rounded down.
@@ -42,9 +44,28 @@ pub fn runTest() !void {
 
         decoder.resetRetainingCapacity();
 
-        try rom_file.seekTo(compressed_text_addr);
-        const bin_text = try decoder.decompressAlloc(allocator, rom_file.reader());
+        var text_fbs = std.io.fixedBufferStream(compressed_text);
+        const bin_text = try decoder.decompressAlloc(allocator, text_fbs.reader());
         defer allocator.free(bin_text);
+
+        {
+            var encoder = try lzw.Encoder.init(allocator);
+            defer encoder.deinit();
+            const recompressed_script = try encoder.compressAlloc(allocator, bin_script);
+            defer allocator.free(recompressed_script);
+            const trimmed_orig = std.mem.trimRight(u8, compressed_script, "\x00");
+            const trimmed_new = std.mem.trimRight(u8, recompressed_script, "\x00");
+            std.debug.assert(std.mem.eql(u8, trimmed_orig, trimmed_new));
+        }
+        {
+            var encoder = try lzw.Encoder.init(allocator);
+            defer encoder.deinit();
+            const recompressed_text = try encoder.compressAlloc(allocator, bin_text);
+            defer allocator.free(recompressed_text);
+            const trimmed_orig = std.mem.trimRight(u8, compressed_text, "\x00");
+            const trimmed_new = std.mem.trimRight(u8, recompressed_text, "\x00");
+            std.debug.assert(std.mem.eql(u8, trimmed_orig, trimmed_new));
+        }
 
         const initial_highest_known_command_address: ?u16 = if (level_id == 0x60) 0x907 + 0x6af6 else null;
         var parsed_ecl = try ecl.binary_parser.parseAlloc(allocator, adjusted_len_bin_script, bin_text, initial_highest_known_command_address);
