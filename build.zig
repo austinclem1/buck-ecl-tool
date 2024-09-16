@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const chm = b.dependency("comptime_hash_map", .{});
+    exe.root_module.addImport("comptime_hash_map", chm.module("comptime_hash_map"));
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

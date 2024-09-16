@@ -1,4 +1,4 @@
-pub const VarType = enum {
+pub const VarType = enum(u2) {
     byte,
     word,
     dword,

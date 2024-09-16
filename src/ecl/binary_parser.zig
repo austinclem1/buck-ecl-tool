@@ -1,9 +1,13 @@
 const std = @import("std");
 
+const chm = @import("comptime_hash_map");
+
 const Ast = @import("Ast.zig");
 const CommandTag = @import("CommandTag.zig").Tag;
 const VarType = @import("VarType.zig").VarType;
 const IndexSlice = @import("../IndexSlice.zig");
+
+const known_vars = @import("known_vars.zig").vars;
 
 const ecl_base = 0x6af6;
 const scratch_start = 0x9e6f;
@@ -246,7 +250,22 @@ fn canonicalizeVarUse(arg: *Arg, script_len: usize) void {
     }
 }
 
+const known_var_map = blk: {
+    const KVTuple = struct { VarUse, []const u8 };
+
+    var kvs: [known_vars.len]KVTuple = undefined;
+    for (known_vars, 0..) |v, i| {
+        const name, const var_type, const address = v;
+        const var_use = .{ .address = address, .var_type = var_type };
+        kvs[i] = .{ var_use, name };
+    }
+
+    break :blk chm.AutoComptimeHashMap(VarUse, []const u8, kvs);
+};
+
 fn generateVarName(allocator: std.mem.Allocator, var_use: VarUse) ![]const u8 {
+    if (known_var_map.get(var_use)) |name| return name.*;
+
     const prefix = switch (var_use.var_type) {
         .byte => "bvar",
         .word => "wvar",
