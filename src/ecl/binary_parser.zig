@@ -10,8 +10,10 @@ const IndexSlice = @import("../IndexSlice.zig");
 const known_vars = @import("known_vars.zig").vars;
 
 const ecl_base = 0x6af6;
-const scratch_start = 0x9e6f;
-const scratch_end = 0x9e79;
+const scratch1_start = 0x97f6;
+const scratch1_end = scratch1_start + 10;
+const scratch2_start = 0x9e6f;
+const scratch2_end = scratch2_start + 8;
 
 const Command = struct {
     tag: CommandTag,
@@ -238,10 +240,16 @@ fn canonicalizeVarUse(arg: *Arg, script_len: usize) void {
     const address = arg.var_use.address;
     const var_type = arg.var_use.var_type;
 
-    if (address >= scratch_start and address < scratch_end) {
+    if (address >= scratch1_start and address < scratch1_end) {
         arg.* = .{ .ptr_deref = .{
-            .base = scratch_start,
-            .offset = address - scratch_start,
+            .base = scratch1_start,
+            .offset = address - scratch1_start,
+            .deref_type = var_type,
+        } };
+    } else if (address >= scratch2_start and address < scratch2_end) {
+        arg.* = .{ .ptr_deref = .{
+            .base = scratch2_start,
+            .offset = address - scratch2_start,
             .deref_type = var_type,
         } };
     } else if (address >= ecl_base and address < ecl_base + script_len) {
