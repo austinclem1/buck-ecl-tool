@@ -287,10 +287,7 @@ fn readString(buffer: []const u8) !struct { usize, []const u8 } {
     return error.NoClosingQuote;
 }
 
-const command_tag_map = blk: {
-    @setEvalBranchQuota(2500);
-    break :blk std.ComptimeStringMap(CommandTag, command_tag_map_kvs);
-};
+const command_tag_map = std.StaticStringMap(CommandTag).initComptime(command_tag_map_kvs);
 const command_tag_map_kvs = blk: {
     const KV = struct { []const u8, CommandTag };
     var result: [std.enums.values(CommandTag).len]KV = undefined;
@@ -302,7 +299,7 @@ const command_tag_map_kvs = blk: {
     break :blk result;
 };
 
-const keyword_map = std.ComptimeStringMap(Token.Variant, .{
+const keyword_map = std.StaticStringMap(Token.Variant).initComptime(.{
     .{ "BYTES", .keyword_BYTES },
     .{ "byte", .keyword_byte },
     .{ "word", .keyword_word },
