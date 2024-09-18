@@ -108,6 +108,17 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
         init_data_refs.sort(SortByAddress{ .keys = init_data_refs.keys() });
     }
 
+    {
+        const SortByAddress = struct {
+            keys: []const VarUse,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.keys[a_index].address < ctx.keys[b_index].address;
+            }
+        };
+        var_map.sort(SortByAddress{ .keys = var_map.keys() });
+    }
+
     const init_segments = try getInitSegmentsFromRefs(arena.allocator(), script_bytes, init_data_refs.keys());
 
     const vars = try getVarsFromVarMap(arena.allocator(), var_map);

@@ -167,6 +167,17 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
         }
     }
 
+    {
+        const SortByAddress = struct {
+            vals: []const VarInfo,
+
+            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                return ctx.vals[a_index].address < ctx.vals[b_index].address;
+            }
+        };
+        self.vars.sort(SortByAddress{ .vals = self.vars.values() });
+    }
+
     var ast_header: [5]usize = undefined;
     if (header_strings) |strings| {
         for (strings, 0..) |str, i| {
