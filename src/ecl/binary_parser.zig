@@ -30,8 +30,8 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
     var var_map = std.AutoArrayHashMap(VarUse, []const u8).init(allocator);
     defer var_map.deinit();
 
-    var init_data_refs = std.AutoArrayHashMap(u16, void).init(allocator);
-    defer init_data_refs.deinit();
+    var data_block_refs = std.AutoArrayHashMap(u16, void).init(allocator);
+    defer data_block_refs.deinit();
 
     var jump_dests = std.AutoArrayHashMap(u16, void).init(allocator);
     defer jump_dests.deinit();
@@ -47,7 +47,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
     // if 1 byte remains, it's probably just padding to
     // keep the script alignment of 2
     if (try script_stream.getEndPos() - script_stream.pos > 1) {
-        try init_data_refs.put(@intCast(ecl_base + script_stream.pos), {});
+        try data_block_refs.put(@intCast(ecl_base + script_stream.pos), {});
     }
 
     for (&header) |address| {
@@ -56,7 +56,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
 
     for (args) |*arg| {
         switch (arg.*) {
-            .jump_dest_addr => |address| try jump_dests.put(address, {}),
+            .jump_dest => |address| try jump_dests.put(address, {}),
             .var_use => canonicalizeVarUse(arg, script_bytes.len),
             else => {},
         }
@@ -75,7 +75,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
                     try var_map.putNoClobber(base_ptr_var, name);
                 }
             },
-            .init_data_addr => |address| try init_data_refs.put(address, {}),
+            .data_block_addr => |address| try data_block_refs.put(address, {}),
             else => {},
         }
     }
@@ -93,7 +93,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
 
     std.debug.assert(jump_dests.count() >= 1);
 
-    const blocks = try getBlocksFromCommandsAndJumpDests(arena.allocator(), commands, jump_dests.keys());
+    const command_blocks = try getBlocksFromCommandsAndJumpDests(arena.allocator(), commands, jump_dests.keys());
 
     const ast_header = astHeaderFromHeader(header, jump_dests);
 
@@ -105,7 +105,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
                 return ctx.keys[a_index] < ctx.keys[b_index];
             }
         };
-        init_data_refs.sort(SortByAddress{ .keys = init_data_refs.keys() });
+        data_block_refs.sort(SortByAddress{ .keys = data_block_refs.keys() });
     }
 
     {
@@ -119,20 +119,20 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
         var_map.sort(SortByAddress{ .keys = var_map.keys() });
     }
 
-    const init_segments = try getInitSegmentsFromRefs(arena.allocator(), script_bytes, init_data_refs.keys());
+    const data_blocks = try getDataBlocksFromRefs(arena.allocator(), script_bytes, data_block_refs.keys());
 
     const vars = try getVarsFromVarMap(arena.allocator(), var_map);
 
     const ast_commands = try getAstCommandsFromCommands(arena.allocator(), commands);
 
-    const ast_args = try getAstArgsFromArgs(arena.allocator(), args, var_map, jump_dests, init_data_refs, duped_text_bytes);
+    const ast_args = try getAstArgsFromArgs(arena.allocator(), args, var_map, jump_dests, data_block_refs, duped_text_bytes);
 
     const ast = Ast{
         .header = ast_header,
-        .blocks = blocks,
+        .command_blocks = command_blocks,
         .commands = ast_commands,
         .args = ast_args,
-        .init_segments = init_segments,
+        .data_blocks = data_blocks,
         .vars = vars,
         .arena = arena,
     };
@@ -178,8 +178,8 @@ fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.Fi
         try commands.append(command);
 
         for (args.items[command.args.start..command.args.stop]) |arg| {
-            if (arg == .jump_dest_addr) {
-                highest_known_command_address = @max(arg.jump_dest_addr, highest_known_command_address);
+            if (arg == .jump_dest) {
+                highest_known_command_address = @max(arg.jump_dest, highest_known_command_address);
             }
         }
 
@@ -265,7 +265,7 @@ fn canonicalizeVarUse(arg: *Arg, script_len: usize) void {
         } };
     } else if (address >= ecl_base and address < ecl_base + script_len) {
         std.debug.assert(var_type == .byte);
-        arg.* = .{ .init_data_addr = address };
+        arg.* = .{ .data_block_addr = address };
     }
 }
 
@@ -309,11 +309,11 @@ fn astHeaderFromHeader(header_addresses: [5]u16, jump_dests: std.AutoArrayHashMa
     return result;
 }
 
-fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []const Command, jump_dests: []const u16) ![]Ast.Block {
+fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []const Command, jump_dests: []const u16) ![]Ast.CommandBlock {
     std.debug.assert(std.sort.isSorted(u16, jump_dests, {}, std.sort.asc(u16)));
 
-    var blocks = try std.ArrayList(Ast.Block).initCapacity(allocator, jump_dests.len);
-    errdefer blocks.deinit();
+    var command_blocks = try std.ArrayList(Ast.CommandBlock).initCapacity(allocator, jump_dests.len);
+    errdefer command_blocks.deinit();
 
     var commands_start: usize = 0;
     for (0..jump_dests.len) |i| {
@@ -331,7 +331,7 @@ fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []c
         );
         errdefer allocator.free(label);
 
-        blocks.appendAssumeCapacity(.{
+        command_blocks.appendAssumeCapacity(.{
             .label = label,
             .commands = IndexSlice{
                 .start = commands_start,
@@ -342,22 +342,22 @@ fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []c
         commands_start = commands_end;
     }
 
-    return blocks.toOwnedSlice();
+    return command_blocks.toOwnedSlice();
 }
 
-fn getInitSegmentsFromRefs(allocator: std.mem.Allocator, script: []const u8, ref_addresses: []const u16) ![]Ast.InitSegment {
+fn getDataBlocksFromRefs(allocator: std.mem.Allocator, script: []const u8, ref_addresses: []const u16) ![]Ast.DataBlock {
     std.debug.assert(std.sort.isSorted(u16, ref_addresses, {}, std.sort.asc(u16)));
 
-    var init_segments = try std.ArrayList(Ast.InitSegment).initCapacity(allocator, ref_addresses.len);
-    errdefer init_segments.deinit();
+    var data_blocks = try std.ArrayList(Ast.DataBlock).initCapacity(allocator, ref_addresses.len);
+    errdefer data_blocks.deinit();
 
     for (0..ref_addresses.len) |i| {
-        const name = try std.fmt.allocPrint(
+        const label = try std.fmt.allocPrint(
             allocator,
-            "init_data{d}",
+            "data{d}",
             .{i},
         );
-        errdefer allocator.free(name);
+        errdefer allocator.free(label);
 
         const start_address = ref_addresses[i];
         const end_address = if (i < ref_addresses.len - 1) ref_addresses[i + 1] else ecl_base + script.len;
@@ -366,13 +366,13 @@ fn getInitSegmentsFromRefs(allocator: std.mem.Allocator, script: []const u8, ref
         const bytes = try allocator.dupe(u8, script[start..end]);
         errdefer allocator.free(bytes);
 
-        init_segments.appendAssumeCapacity(.{
-            .name = name,
+        data_blocks.appendAssumeCapacity(.{
+            .label = label,
             .bytes = bytes,
         });
     }
 
-    return init_segments.toOwnedSlice();
+    return data_blocks.toOwnedSlice();
 }
 
 fn getVarsFromVarMap(allocator: std.mem.Allocator, var_map: std.AutoArrayHashMap(VarUse, []const u8)) ![]Ast.Var {
@@ -405,9 +405,9 @@ fn getAstCommandsFromCommands(allocator: std.mem.Allocator, commands: []const Co
     return ast_commands.toOwnedSlice();
 }
 
-fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: std.AutoArrayHashMap(VarUse, []const u8), jump_dests: std.AutoArrayHashMap(u16, void), init_data_refs: std.AutoArrayHashMap(u16, void), text_bytes: []const u8) ![]Ast.Arg {
+fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: std.AutoArrayHashMap(VarUse, []const u8), jump_dests: std.AutoArrayHashMap(u16, void), data_block_refs: std.AutoArrayHashMap(u16, void), text_bytes: []const u8) ![]Ast.Arg {
     std.debug.assert(std.sort.isSorted(u16, jump_dests.keys(), {}, std.sort.asc(u16)));
-    std.debug.assert(std.sort.isSorted(u16, init_data_refs.keys(), {}, std.sort.asc(u16)));
+    std.debug.assert(std.sort.isSorted(u16, data_block_refs.keys(), {}, std.sort.asc(u16)));
 
     var ast_args = try std.ArrayList(Ast.Arg).initCapacity(allocator, args.len);
     errdefer ast_args.deinit();
@@ -421,8 +421,8 @@ fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: 
                 .offset = info.offset,
                 .deref_type = info.deref_type,
             } },
-            .jump_dest_addr => |address| .{ .jump_dest_block = jump_dests.getIndex(address).? },
-            .init_data_addr => |address| .{ .init_data_segment = init_data_refs.getIndex(address).? },
+            .jump_dest => |address| .{ .command_block = jump_dests.getIndex(address).? },
+            .data_block_addr => |address| .{ .data_block = data_block_refs.getIndex(address).? },
             .string => |offset| .{ .string = std.mem.sliceTo(text_bytes[offset..], '\x00') },
         };
 
@@ -432,7 +432,7 @@ fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: 
     return ast_args.toOwnedSlice();
 }
 
-const Block = struct {
+const CommandBlock = struct {
     address: u16,
     commands: IndexSlice,
 };
@@ -459,8 +459,8 @@ const Arg = union(enum) {
     immediate: u32,
     var_use: VarUse,
     ptr_deref: PtrDeref,
-    jump_dest_addr: u16,
-    init_data_addr: u16,
+    jump_dest: u16,
+    data_block_addr: u16,
     string: u16,
 
     const Encoding = enum {
@@ -592,7 +592,7 @@ fn readJumpDestArg(reader: anytype) !Arg {
         return error.WrongArgEncoding;
     }
 
-    return .{ .jump_dest_addr = arg.var_use.address };
+    return .{ .jump_dest = arg.var_use.address };
 }
 
 const Var = struct {
@@ -607,7 +607,7 @@ pub const VarMapKey = struct {
     type: VarType,
 };
 
-const InitializedDataSegment = struct {
-    name: []const u8,
+const DataBlock = struct {
+    label: []const u8,
     bytes: []const u8,
 };

@@ -15,30 +15,30 @@ const IndexSlice = @import("../IndexSlice.zig");
 
 allocator: Allocator,
 state: State,
-blocks: std.StringArrayHashMap(IndexSlice),
+command_blocks: std.StringArrayHashMap(IndexSlice),
 commands: std.ArrayList(Ast.Command),
 args: std.ArrayList(Arg),
 vars: std.StringArrayHashMap(VarInfo),
-init_segments: std.StringArrayHashMap([]const u8),
+data_blocks: std.StringArrayHashMap([]const u8),
 
 pub fn init(allocator: Allocator) TextParser {
     return .{
         .allocator = allocator,
         .state = .start,
-        .blocks = std.StringArrayHashMap(IndexSlice).init(allocator),
+        .command_blocks = std.StringArrayHashMap(IndexSlice).init(allocator),
         .commands = std.ArrayList(Ast.Command).init(allocator),
         .args = std.ArrayList(Arg).init(allocator),
         .vars = std.StringArrayHashMap(VarInfo).init(allocator),
-        .init_segments = std.StringArrayHashMap([]const u8).init(allocator),
+        .data_blocks = std.StringArrayHashMap([]const u8).init(allocator),
     };
 }
 
 pub fn deinit(self: *TextParser) void {
-    self.blocks.deinit();
+    self.command_blocks.deinit();
     self.commands.deinit();
     self.args.deinit();
     self.vars.deinit();
-    self.init_segments.deinit();
+    self.data_blocks.deinit();
 
     self.* = undefined;
 }
@@ -87,11 +87,11 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                     },
                     .identifier => {
                         const label_str = try parseLabel(&token_stream);
-                        if (self.blocks.contains(label_str)) {
+                        if (self.command_blocks.contains(label_str)) {
                             std.debug.print("error: Redeclaration of label {s} at byte {d}\n", .{ label_str, tok.location });
                             return error.ParsingFailed;
                         }
-                        if (self.init_segments.contains(label_str)) {
+                        if (self.data_blocks.contains(label_str)) {
                             std.debug.print("error: Redeclaration of label {s} at byte {d}\n", .{ label_str, tok.location });
                             return error.ParsingFailed;
                         }
@@ -129,7 +129,7 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                     .newline => _ = token_stream.next(),
                     .command => try self.parseCommand(&token_stream),
                     .identifier, .eof => {
-                        try self.blocks.putNoClobber(in_progress_label.?, IndexSlice{
+                        try self.command_blocks.putNoClobber(in_progress_label.?, IndexSlice{
                             .start = block_commands_start,
                             .stop = self.commands.items.len,
                         });
@@ -152,7 +152,7 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                     .newline => _ = token_stream.next(),
                     .keyword_BYTES => {
                         const duped_bytes = try parseBytes(ast_arena.allocator(), &token_stream);
-                        try self.init_segments.putNoClobber(in_progress_label.?, duped_bytes);
+                        try self.data_blocks.putNoClobber(in_progress_label.?, duped_bytes);
                         in_progress_label = null;
                     },
                     .identifier => self.state = .start,
@@ -181,7 +181,7 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
     var ast_header: [5]usize = undefined;
     if (header_strings) |strings| {
         for (strings, 0..) |str, i| {
-            ast_header[i] = self.blocks.getIndex(str) orelse {
+            ast_header[i] = self.command_blocks.getIndex(str) orelse {
                 std.debug.print("error: no definition found for header label \"{s}\"\n", .{str});
                 return error.ParsingFailed;
             };
@@ -191,12 +191,12 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
         return error.ParsingFailed;
     }
 
-    const ast_blocks = try ast_arena.allocator().alloc(Ast.Block, self.blocks.count());
-    for (ast_blocks, 0..) |*dest, i| {
-        const duped_label = try ast_arena.allocator().dupe(u8, self.blocks.keys()[i]);
-        dest.* = Ast.Block{
+    const ast_command_blocks = try ast_arena.allocator().alloc(Ast.CommandBlock, self.command_blocks.count());
+    for (ast_command_blocks, 0..) |*dest, i| {
+        const duped_label = try ast_arena.allocator().dupe(u8, self.command_blocks.keys()[i]);
+        dest.* = Ast.CommandBlock{
             .label = duped_label,
-            .commands = self.blocks.values()[i],
+            .commands = self.command_blocks.values()[i],
         };
     }
 
@@ -210,13 +210,13 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
                 if (self.vars.getIndex(str)) |var_index| {
                     break :blk Ast.Arg{ .var_use = var_index };
                 }
-                if (self.blocks.getIndex(str)) |block_index| {
-                    break :blk Ast.Arg{ .jump_dest_block = block_index };
+                if (self.command_blocks.getIndex(str)) |block_index| {
+                    break :blk Ast.Arg{ .command_block = block_index };
                 }
-                if (self.init_segments.getIndex(str)) |segment_index| {
-                    break :blk Ast.Arg{ .init_data_segment = segment_index };
+                if (self.data_blocks.getIndex(str)) |block_index| {
+                    break :blk Ast.Arg{ .data_block = block_index };
                 }
-                std.debug.print("error: identifier \"{s}\" not associated with a variable, label, or bytes segment\n", .{str});
+                std.debug.print("error: identifier \"{s}\" not associated with a variable or label\n", .{str});
                 return error.ParsingFailed;
             },
             .ptr_deref => |deref_info| blk: {
@@ -241,12 +241,12 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
         };
     }
 
-    const ast_init_segments = try ast_arena.allocator().alloc(Ast.InitSegment, self.init_segments.count());
-    for (ast_init_segments, 0..) |*dest, i| {
-        const duped_name = try ast_arena.allocator().dupe(u8, self.init_segments.keys()[i]);
-        const duped_bytes = try ast_arena.allocator().dupe(u8, self.init_segments.values()[i]);
-        dest.* = Ast.InitSegment{
-            .name = duped_name,
+    const ast_data_blocks = try ast_arena.allocator().alloc(Ast.DataBlock, self.data_blocks.count());
+    for (ast_data_blocks, 0..) |*dest, i| {
+        const duped_label = try ast_arena.allocator().dupe(u8, self.data_blocks.keys()[i]);
+        const duped_bytes = try ast_arena.allocator().dupe(u8, self.data_blocks.values()[i]);
+        dest.* = Ast.DataBlock{
+            .label = duped_label,
             .bytes = duped_bytes,
         };
     }
@@ -263,10 +263,10 @@ pub fn parse(self: *TextParser, text: []const u8) !Ast {
 
     return Ast{
         .header = ast_header,
-        .blocks = ast_blocks,
+        .command_blocks = ast_command_blocks,
         .commands = ast_commands,
         .args = ast_args,
-        .init_segments = ast_init_segments,
+        .data_blocks = ast_data_blocks,
         .vars = ast_vars,
         .arena = ast_arena,
     };
@@ -447,7 +447,7 @@ const Arg = union(enum) {
     string: []const u8,
 };
 
-const InitSegment = struct {
+const DataBlock = struct {
     label: []const u8,
     bytes: []const u8,
 };
