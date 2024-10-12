@@ -319,15 +319,16 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) error{Fa
         return error.Failed;
     };
     defer rom.close();
+    const rom_stream = rom.seekableStream();
     for (ecl.level_ids) |id| {
         if (id == 0x61) continue;
 
-        const compressed_script = ecl.fileReadCompressedScriptAlloc(allocator, rom, id) catch {
+        const compressed_script = ecl.readCompressedScriptAlloc(allocator, rom_stream, id) catch {
             std.debug.print("Error: Failed to read compressed script section for level id {d}\n", .{id});
             return error.Failed;
         };
         defer allocator.free(compressed_script);
-        const compressed_text = ecl.fileReadCompressedTextAlloc(allocator, rom, id) catch {
+        const compressed_text = ecl.readCompressedTextAlloc(allocator, rom_stream, id) catch {
             std.debug.print("Error: Failed to read compressed text section for level id {d}\n", .{id});
             return error.Failed;
         };
@@ -383,4 +384,9 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) error{Fa
             return error.Failed;
         };
     }
+}
+
+fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.log.err(format, args);
+    std.process.exit(1);
 }
