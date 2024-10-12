@@ -34,10 +34,7 @@ pub fn main() !void {
             printHelp();
             return;
         };
-        extractAllCommand(allocator, subcommandArgs) catch {
-            std.debug.print("Error: extract-all command failed\n", .{});
-            return;
-        };
+        extractAllCommand(allocator, subcommandArgs);
     } else if (std.mem.eql(u8, subcommand, "patch-rom")) {
         const remaining_args = args[2..];
         _ = remaining_args;
@@ -313,75 +310,62 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
     };
 }
 
-fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) error{Failed}!void {
-    var rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch {
-        std.debug.print("Error: Failed to open input rom \"{s}\"\n", .{args.input_rom_path});
-        return error.Failed;
-    };
+fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
+    var rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch fatal("failed to open input rom \"{s}\"\n", .{args.input_rom_path});
     defer rom.close();
     const rom_stream = rom.seekableStream();
     for (ecl.level_ids) |id| {
         if (id == 0x61) continue;
 
-        const compressed_script = ecl.readCompressedScriptAlloc(allocator, rom_stream, id) catch {
-            std.debug.print("Error: Failed to read compressed script section for level id {d}\n", .{id});
-            return error.Failed;
+        const compressed_script = ecl.readCompressedScriptAlloc(allocator, rom_stream, id) catch |err| {
+            fatal("failed to read compressed script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
         };
         defer allocator.free(compressed_script);
-        const compressed_text = ecl.readCompressedTextAlloc(allocator, rom_stream, id) catch {
-            std.debug.print("Error: Failed to read compressed text section for level id {d}\n", .{id});
-            return error.Failed;
+        const compressed_text = ecl.readCompressedTextAlloc(allocator, rom_stream, id) catch |err| {
+            fatal("failed to read compressed text section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
         };
         defer allocator.free(compressed_text);
 
-        var decoder = lzw.Decoder.init(allocator) catch {
-            std.debug.print("Error: Failed to initialize lzw decoder\n", .{});
-            return error.Failed;
+        var decoder = lzw.Decoder.init(allocator) catch |err| {
+            fatal("failed to initialize lzw decoder, error: {s}\n", .{@errorName(err)});
         };
         defer decoder.deinit();
         const bin_script = blk: {
             var fbs = std.io.fixedBufferStream(compressed_script);
-            break :blk decoder.decompressAlloc(allocator, fbs.reader()) catch {
-                std.debug.print("Error: Failed to decompress script section for level id {d}\n", .{id});
-                return error.Failed;
+            break :blk decoder.decompressAlloc(allocator, fbs.reader()) catch |err| {
+                fatal("failed to decompress script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
             };
         };
         defer allocator.free(bin_script);
         decoder.resetRetainingCapacity();
         const bin_text = blk: {
             var fbs = std.io.fixedBufferStream(compressed_text);
-            break :blk decoder.decompressAlloc(allocator, fbs.reader()) catch {
-                std.debug.print("Error: Failed to decompress script section for level id {d}\n", .{id});
-                return error.Failed;
+            break :blk decoder.decompressAlloc(allocator, fbs.reader()) catch |err| {
+                fatal("failed to decompress script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
             };
         };
         defer allocator.free(bin_text);
         const init_highest = if (id == 0x60) 0x907 + ecl_base else null;
-        var ast = ecl.binary_parser.parseAlloc(allocator, bin_script, bin_text, init_highest) catch {
-            std.debug.print("Error: Failed disassembly for level id {d}\n", .{id});
-            return error.Failed;
+        var ast = ecl.binary_parser.parseAlloc(allocator, bin_script, bin_text, init_highest) catch |err| {
+            fatal("failed disassembly for level id {d}, error: {s}\n", .{ id, @errorName(err) });
         };
         defer ast.deinit();
 
-        var out_dir = std.fs.cwd().makeOpenPath(args.output_dir_path, .{}) catch {
-            std.debug.print("Error: Failed to create and open path \"{s}\"\n", .{args.output_dir_path});
-            return error.Failed;
+        var out_dir = std.fs.cwd().makeOpenPath(args.output_dir_path, .{}) catch |err| {
+            fatal("failed to create and open path {s}, error: {s}\n", .{ args.output_dir_path, @errorName(err) });
         };
         defer out_dir.close();
 
         var buf: [32]u8 = undefined;
-        const filename = std.fmt.bufPrint(&buf, "{d:0>2}.ecl", .{id}) catch {
-            std.debug.print("Error: output path too long\n", .{});
-            return error.Failed;
+        const filename = std.fmt.bufPrint(&buf, "{d:0>2}.ecl", .{id}) catch |err| {
+            fatal("output path too long, error: {s}\n", .{@errorName(err)});
         };
-        var out_file = out_dir.createFile(filename, .{}) catch {
-            std.debug.print("Error: failed to create file {s} in path {s}\n", .{ filename, args.output_dir_path });
-            return error.Failed;
+        var out_file = out_dir.createFile(filename, .{}) catch |err| {
+            fatal("failed to create file {s} in path {s}, error: {s}\n", .{ filename, args.output_dir_path, @errorName(err) });
         };
         defer out_file.close();
-        ast.serializeText(out_file.writer()) catch {
-            std.debug.print("Error: failed to serialize ecl for level id {d} to file {s}\n", .{ id, filename });
-            return error.Failed;
+        ast.serializeText(out_file.writer()) catch |err| {
+            fatal("failed to serialize ecl for level id {d} to file {s}, error: {s}\n", .{ id, filename, @errorName(err) });
         };
     }
 }
