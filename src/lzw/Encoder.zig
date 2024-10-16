@@ -4,9 +4,10 @@ const Allocator = std.mem.Allocator;
 
 pub const Encoder = @This();
 
+bit_buffer: BitBuffer = .{},
 arena: std.heap.ArenaAllocator,
 dict: std.MultiArrayList(DictEntry),
-code_width: u8 = initial_code_width,
+code_width: u4 = initial_code_width,
 cur_prefix: u16 = 0,
 on_first_byte: bool = true,
 
@@ -48,8 +49,6 @@ pub fn compressAlloc(self: *Encoder, allocator: Allocator, input_bytes: []const 
     var out_buffer = std.ArrayList(u8).init(allocator);
     defer out_buffer.deinit();
 
-    var out_writer = std.io.bitWriter(.big, out_buffer.writer());
-
     for (input_bytes) |ch| {
         if (self.on_first_byte) {
             self.on_first_byte = false;
@@ -60,29 +59,36 @@ pub fn compressAlloc(self: *Encoder, allocator: Allocator, input_bytes: []const 
         if (self.indexOfMatchingEntry(self.cur_prefix, ch)) |match| {
             self.cur_prefix = match;
         } else {
-            try self.writeCode(self.cur_prefix, &out_writer);
+            try self.writeCode(self.cur_prefix, out_buffer.writer());
             try self.maybeUpdateDictAndCodeWidth(ch);
             self.cur_prefix = ch;
         }
     }
 
-    try self.writeCode(self.cur_prefix, &out_writer);
-    try self.writeCode(end_code, &out_writer);
-    try out_writer.flushBits();
+    try self.writeCode(self.cur_prefix, out_buffer.writer());
+    try self.writeCode(end_code, out_buffer.writer());
+
+    const remaining_bits = self.bit_buffer.readAll();
+    try out_buffer.writer().writeInt(u32, remaining_bits, .big);
+    if (out_buffer.items.len % 2 == 1) try out_buffer.append(0);
 
     return try out_buffer.toOwnedSlice();
 }
 
 fn writeCode(self: *Encoder, code: u16, writer: anytype) !void {
+    while (self.bit_buffer.readByte()) |byte| {
+        try writer.writeByte(byte);
+    }
+
     const lower_bits_mask = (@as(u16, 1) << @intCast(self.code_width - 1)) - 1;
 
     const dict_len_masked = (self.dict.len - 1) & lower_bits_mask;
     const code_masked = code & lower_bits_mask;
 
-    try writer.writeBits(code_masked, self.code_width - 1);
+    try self.bit_buffer.writeBits(code_masked, self.code_width - 1);
     if (code_masked <= dict_len_masked) {
         const most_sig_bit = getBitAt(code, @intCast(self.code_width - 1));
-        try writer.writeBits(most_sig_bit, 1);
+        try self.bit_buffer.writeBits(most_sig_bit, 1);
     }
 }
 
@@ -117,6 +123,39 @@ fn indexOfMatchingEntry(self: *Encoder, prefix: u16, suffix: u8) ?u16 {
 fn getBitAt(val: u16, index: u4) u1 {
     return @intCast((val >> index) & 1);
 }
+
+const BitBuffer = struct {
+    backing_int: u32 = 0,
+    open_bits: u6 = bit_size,
+
+    const bit_size = 32;
+
+    pub fn writeBits(self: *BitBuffer, val: u32, bit_count: u6) !void {
+        if (self.open_bits < bit_count) return error.OutOfSpace;
+
+        const shift_amt: u5 = @intCast(self.open_bits - bit_count);
+        self.backing_int |= (val << shift_amt);
+        self.open_bits -= bit_count;
+    }
+
+    pub fn readByte(self: *BitBuffer) ?u8 {
+        if (self.open_bits > (bit_size - 8)) return null;
+
+        const byte: u8 = @intCast(self.backing_int >> (bit_size - 8));
+
+        self.backing_int <<= 8;
+        self.open_bits += 8;
+
+        return byte;
+    }
+
+    pub fn readAll(self: *BitBuffer) u32 {
+        const result = self.backing_int;
+        self.backing_int = 0;
+        self.open_bits = bit_size;
+        return result;
+    }
+};
 
 // pub fn debugPrintDict(self: *const Self) void {
 //     var start: usize = end_code + 1;
