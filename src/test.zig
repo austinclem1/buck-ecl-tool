@@ -11,8 +11,9 @@ pub fn runTest() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const rom_file = try std.fs.cwd().openFile("buck.md", .{});
+    const rom_file = try std.fs.cwd().openFile("fixed_buck.md", .{});
     defer rom_file.close();
+    const rom_stream = rom_file.seekableStream();
 
     for (ecl.level_ids) |level_id| {
         // we skip 0x61 because there might be a bug in the game or this particular rom dump
@@ -23,10 +24,10 @@ pub fn runTest() !void {
         // significant to finding the rom address of the compressed level data
         if (level_id == 0x61) continue;
 
-        const compressed_script = try ecl.fileReadCompressedScriptAlloc(allocator, rom_file, level_id);
+        const compressed_script = try ecl.readCompressedScriptAlloc(allocator, rom_stream, level_id);
         defer allocator.free(compressed_script);
 
-        const compressed_text = try ecl.fileReadCompressedTextAlloc(allocator, rom_file, level_id);
+        const compressed_text = try ecl.readCompressedTextAlloc(allocator, rom_stream, level_id);
         defer allocator.free(compressed_text);
 
         var decoder = try lzw.Decoder.init(allocator);
