@@ -36,8 +36,11 @@ pub fn main() !void {
         };
         extractAllCommand(allocator, subcommandArgs);
     } else if (std.mem.eql(u8, subcommand, "patch-rom")) {
-        const remaining_args = args[2..];
-        _ = remaining_args;
+        const subcommandArgs = parsePatchRomCommandArgs(args[2..]) catch {
+            printHelp();
+            return;
+        };
+        patchRomCommand(allocator, subcommandArgs);
     } else {
         printHelp();
         return;
@@ -167,15 +170,15 @@ fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ecl.Ast {
     return parser.parse(file_bytes);
 }
 
-fn calculateSegaHeaderChecksum(rom_bytes: []const u8) !u16 {
-    if (rom_bytes.len % 2 != 0) return error.RomOddLegth;
+fn calculateSegaHeaderChecksum(seekable_stream: anytype) !u16 {
+    const rom_len = try seekable_stream.getEndPos();
+    if (rom_len % 2 != 0) return error.RomOddLegth;
 
-    var fbs = std.io.fixedBufferStream(rom_bytes);
-    fbs.seekTo(0x200) catch return error.RomTooSmall;
+    try seekable_stream.seekTo(0x200);
 
     var checksum: u16 = 0;
 
-    while (fbs.reader().readInt(u16, .big)) |val| {
+    while (seekable_stream.context.reader().readInt(u16, .big)) |val| {
         checksum +%= val;
     } else |err| switch (err) {
         error.EndOfStream => {},
@@ -303,10 +306,22 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
     }
 
     return PatchRomCommandArgs{
-        .input_rom_path orelse {},
-        .input_ecl_path orelse {},
-        .dest_level_id orelse {},
-        .output_rom_path orelse {},
+        .input_rom_path = input_rom_path orelse {
+            std.debug.print("Error: No input rom path given\n", .{});
+            return error.ParseArgsFailed;
+        },
+        .input_ecl_path = input_ecl_path orelse {
+            std.debug.print("Error: No input ecl path given\n", .{});
+            return error.ParseArgsFailed;
+        },
+        .dest_level_id = dest_level_id orelse {
+            std.debug.print("Error: No destination level id given\n", .{});
+            return error.ParseArgsFailed;
+        },
+        .output_rom_path = output_rom_path orelse {
+            std.debug.print("Error: No output rom path given\n", .{});
+            return error.ParseArgsFailed;
+        },
     };
 }
 
@@ -368,6 +383,122 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
             fatal("failed to serialize ecl for level id {d} to file {s}, error: {s}\n", .{ id, filename, @errorName(err) });
         };
     }
+}
+
+fn patchRomCommand(allocator: Allocator, args: PatchRomCommandArgs) void {
+    var in_rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch fatal("failed to open input rom \"{s}\"\n", .{args.input_rom_path});
+    defer in_rom.close();
+
+    var out_rom_bytes = in_rom.readToEndAlloc(allocator, 1024 * 1024 * 16) catch |err| {
+        fatal("failed to read file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+    };
+    defer allocator.free(out_rom_bytes);
+
+    var in_ecl = std.fs.cwd().openFile(args.input_ecl_path, .{}) catch fatal("failed to open input ecl text file \"{s}\"\n", .{args.input_ecl_path});
+    defer in_ecl.close();
+
+    const in_ecl_bytes = in_ecl.readToEndAlloc(allocator, 1024 * 1024 * 32) catch |err| {
+        fatal("failed to read file {s}, error: {s}\n", .{ args.input_ecl_path, @errorName(err) });
+    };
+    defer allocator.free(in_ecl_bytes);
+
+    var parsed_ecl = blk: {
+        var parser = ecl.TextParser.init(allocator);
+        defer parser.deinit();
+
+        break :blk parser.parse(in_ecl_bytes) catch |err| {
+            fatal("failed to parse file {s}, error: {s}\n", .{ args.input_ecl_path, @errorName(err) });
+        };
+    };
+    defer parsed_ecl.deinit();
+
+    const ecl_binary = parsed_ecl.serializeBinary(allocator) catch |err| {
+        fatal("failed to serialize parsed ecl to binary, error: {s}\n", .{@errorName(err)});
+    };
+    defer allocator.free(ecl_binary.script);
+    defer allocator.free(ecl_binary.text);
+
+    {
+        const compressed_script = blk: {
+            var encoder = lzw.Encoder.init(allocator) catch |err| {
+                fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
+            };
+            defer encoder.deinit();
+            break :blk encoder.compressAlloc(allocator, ecl_binary.script) catch |err| {
+                fatal("failed to compress ecl binary script data, error: {s}\n", .{@errorName(err)});
+            };
+        };
+        defer allocator.free(compressed_script);
+
+        const dest_start, const dest_end = ecl.getScriptAddrs(in_rom.seekableStream(), 0x10) catch |err| {
+            fatal("failed to read script dest address from rom file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+        };
+        const max_script_size = dest_end - dest_start;
+
+        if (compressed_script.len > max_script_size) {
+            fatal("resulting script data larger than original data: {d} bytes (original {d})\n", .{ compressed_script.len, max_script_size });
+        }
+
+        std.mem.copyForwards(u8, out_rom_bytes[dest_start..dest_end], compressed_script);
+    }
+
+    {
+        const compressed_text = blk: {
+            var encoder = lzw.Encoder.init(allocator) catch |err| {
+                fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
+            };
+            defer encoder.deinit();
+            break :blk encoder.compressAlloc(allocator, ecl_binary.text) catch |err| {
+                fatal("failed to compress ecl binary text data, error: {s}\n", .{@errorName(err)});
+            };
+        };
+        defer allocator.free(compressed_text);
+
+        const dest_start, const dest_end = ecl.getTextAddrs(in_rom.seekableStream(), 0x10) catch |err| {
+            fatal("failed to read text dest address from rom file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+        };
+        const max_text_size = dest_end - dest_start;
+
+        if (compressed_text.len > max_text_size) {
+            fatal("resulting text data larger than original data: {d} bytes (original {d})\n", .{ compressed_text.len, max_text_size });
+        }
+
+        std.mem.copyForwards(u8, out_rom_bytes[dest_start..dest_end], compressed_text);
+    }
+
+    {
+        // TODO: this patching of the checksum could be a separate command
+        var fbs = std.io.fixedBufferStream(out_rom_bytes);
+        fixRomChecksum(fbs.seekableStream()) catch |err| {
+            fatal("failed to patch checksum for output rom bytes, error: {s}\n", .{@errorName(err)});
+        };
+    }
+
+    var out_rom = std.fs.cwd().createFile(args.output_rom_path, .{}) catch |err| {
+        fatal("failed to create output rom file \"{s}\", error: {s}\n", .{ args.output_rom_path, @errorName(err) });
+    };
+    defer out_rom.close();
+
+    out_rom.writeAll(out_rom_bytes) catch |err| {
+        fatal("failed to write to output rom file \"{s}\", error: {s}\n", .{ args.output_rom_path, @errorName(err) });
+    };
+}
+
+fn fixRomChecksum(seekable_stream: anytype) !void {
+    seekable_stream.seekTo(0x300) catch return error.SeekFailed;
+
+    const m68k_nop_code: u16 = 0x4e71;
+
+    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
+    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
+    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
+
+    // calculate standard sega header checksum and patch the rom with that
+    const sega_checksum = calculateSegaHeaderChecksum(seekable_stream) catch |err| {
+        fatal("failed to calculate rom checksum, error: {s}\n", .{@errorName(err)});
+    };
+    seekable_stream.seekTo(0x18e) catch return error.SeekFailed;
+    seekable_stream.context.writer().writeInt(u16, sega_checksum, .big) catch return error.WriteFailed;
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
