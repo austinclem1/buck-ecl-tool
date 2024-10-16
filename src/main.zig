@@ -45,116 +45,6 @@ pub fn main() !void {
         printHelp();
         return;
     }
-
-    //if (true) {
-    //    var rom = try std.fs.cwd().openFile("buck.md", .{});
-    //    defer rom.close();
-    //    for (ecl.level_ids) |id| {
-    //        if (id == 0x61) continue;
-
-    //        const compressed_script = try ecl.fileReadCompressedScriptAlloc(allocator, rom, id);
-    //        defer allocator.free(compressed_script);
-    //        const compressed_text = try ecl.fileReadCompressedTextAlloc(allocator, rom, id);
-    //        defer allocator.free(compressed_text);
-
-    //        var decoder = try lzw.Decoder.init(allocator);
-    //        defer decoder.deinit();
-    //        const bin_script = blk: {
-    //            var fbs = std.io.fixedBufferStream(compressed_script);
-    //            break :blk try decoder.decompressAlloc(allocator, fbs.reader());
-    //        };
-    //        defer allocator.free(bin_script);
-    //        decoder.resetRetainingCapacity();
-    //        const bin_text = blk: {
-    //            var fbs = std.io.fixedBufferStream(compressed_text);
-    //            break :blk try decoder.decompressAlloc(allocator, fbs.reader());
-    //        };
-    //        defer allocator.free(bin_text);
-    //        const init_highest = if (id == 0x60) 0x907 + ecl_base else null;
-    //        var ast = try ecl.binary_parser.parseAlloc(allocator, bin_script, bin_text, init_highest);
-    //        defer ast.deinit();
-
-    //        var buf: [100]u8 = undefined;
-    //        const out_path = try std.fmt.bufPrint(&buf, "ecl_out/{d}.ecl", .{id});
-    //        var out_file = try std.fs.cwd().createFile(out_path, .{});
-    //        defer out_file.close();
-    //        try ast.serializeText(out_file.writer());
-    //    }
-    //}
-
-    //std.debug.print("Parsing \"{s}\"\n", .{input_ecl_path});
-    //var ast = try parseFile(allocator, input_ecl_path);
-    //defer ast.deinit();
-
-    //const ecl_binary = try ast.serializeBinary(allocator);
-    //defer allocator.free(ecl_binary.script);
-    //defer allocator.free(ecl_binary.text);
-
-    //std.debug.print("Read rom data from \"{s}\"\n", .{input_rom_path});
-    //const in_rom = try std.fs.cwd().openFile(input_rom_path, .{});
-    //defer in_rom.close();
-
-    //var rom_bytes = try in_rom.readToEndAlloc(allocator, 1024 * 1024 * 4);
-    //defer allocator.free(rom_bytes);
-
-    //{
-    //    const compressed_script = blk: {
-    //        var encoder = try lzw.Encoder.init(allocator);
-    //        defer encoder.deinit();
-    //        break :blk try encoder.compressAlloc(allocator, ecl_binary.script);
-    //    };
-    //    defer allocator.free(compressed_script);
-
-    //    const dest_start, const dest_end = try ecl.getScriptAddrs(in_rom, 0x10);
-    //    const max_script_size = dest_end - dest_start;
-    //    if (compressed_script.len > max_script_size) {
-    //        std.debug.print("resulting script too long: {d} (max {d})\n", .{ compressed_script.len, max_script_size });
-    //        return;
-    //    }
-
-    //    std.mem.copyForwards(u8, rom_bytes[dest_start..dest_end], compressed_script);
-    //}
-
-    //{
-    //    const compressed_text = blk: {
-    //        var encoder = try lzw.Encoder.init(allocator);
-    //        defer encoder.deinit();
-    //        break :blk try encoder.compressAlloc(allocator, ecl_binary.text);
-    //    };
-    //    defer allocator.free(compressed_text);
-
-    //    const dest_start, const dest_end = try ecl.getTextAddrs(in_rom, 0x10);
-    //    const max_text_size = dest_end - dest_start;
-
-    //    if (compressed_text.len > max_text_size) {
-    //        std.debug.print("resulting text too long: {d} (max {d})\n", .{ compressed_text.len, max_text_size });
-    //    }
-
-    //    std.mem.copyForwards(u8, rom_bytes[dest_start..dest_end], compressed_text);
-    //}
-
-    //{
-    //    var fbs = std.io.fixedBufferStream(rom_bytes);
-
-    //    // turn buck's custom checksum function call into 3 NOPs
-    //    try fbs.seekTo(0x300);
-
-    //    const m68k_nop_code: u16 = 0x4e71;
-
-    //    try fbs.writer().writeInt(u16, m68k_nop_code, .big);
-    //    try fbs.writer().writeInt(u16, m68k_nop_code, .big);
-    //    try fbs.writer().writeInt(u16, m68k_nop_code, .big);
-
-    //    // calculate standard sega header checksum and patch the rom with that
-    //    const sega_checksum = try calculateSegaHeaderChecksum(rom_bytes);
-    //    try fbs.seekTo(0x18e);
-    //    try fbs.writer().writeInt(u16, sega_checksum, .big);
-    //}
-
-    //var out_rom = try std.fs.cwd().createFile(output_rom_path, .{});
-    //defer out_rom.close();
-
-    //try out_rom.writeAll(rom_bytes);
 }
 
 fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ecl.Ast {
@@ -330,8 +220,6 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
     defer rom.close();
     const rom_stream = rom.seekableStream();
     for (ecl.level_ids) |id| {
-        if (id == 0x61) continue;
-
         const compressed_script = ecl.readCompressedScriptAlloc(allocator, rom_stream, id) catch |err| {
             fatal("failed to read compressed script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
         };
