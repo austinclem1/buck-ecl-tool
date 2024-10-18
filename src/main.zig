@@ -41,6 +41,12 @@ pub fn main() !void {
             return;
         };
         patchRomCommand(allocator, subcommandArgs);
+    } else if (std.mem.eql(u8, subcommand, "fix-mariposa")) {
+        const subcommandArgs = parseFixMariposaCommandArgs(args[2..]) catch {
+            printHelp();
+            return;
+        };
+        fixMariposaCommand(subcommandArgs);
     } else {
         printHelp();
         return;
@@ -84,7 +90,15 @@ fn printHelp() void {
         \\Commands:
         \\
         \\  extract-all --rom [input rom path] --out [output directory]
+        \\    Extract all levels in rom as text ECL format to output directory
+        \\
         \\  patch-rom --rom [input rom path] --ecl [updated ecl path] --dest-level [rom level id to overwrite] --out [output rom path]
+        \\    Patch specified level id in rom with the given text ECL file, writing the updated rom file to [out]
+        \\
+        \\  fix-mariposa --rom [input rom path]
+        \\    Apply fix to original compressed mariposa text data in rom that causes lzw decoder to erroneously keep running on
+        \\    level id 97 (0x61)
+        \\
     , .{});
 }
 
@@ -369,6 +383,54 @@ fn patchRomCommand(allocator: Allocator, args: PatchRomCommandArgs) void {
 
     out_rom.writeAll(out_rom_bytes) catch |err| {
         fatal("failed to write to output rom file \"{s}\", error: {s}\n", .{ args.output_rom_path, @errorName(err) });
+    };
+}
+
+fn fixMariposaCommand(args: FixMariposaCommandArgs) void {
+    var rom = std.fs.cwd().openFile(args.rom_path, .{ .mode = .write_only }) catch fatal("failed to open input rom \"{s}\"\n", .{args.rom_path});
+    defer rom.close();
+    const rom_stream = rom.seekableStream();
+    rom_stream.seekTo(0x4fadb) catch |err| {
+        fatal("failed seeking rom file to mariposa fix destination, error: {s}\n", .{@errorName(err)});
+    };
+    rom_stream.context.writer().writeInt(u16, 0x1010, .big) catch |err| {
+        fatal("failed writing mariposa text fix to rom, error: {s}\n", .{@errorName(err)});
+    };
+}
+
+const FixMariposaCommandArgs = struct {
+    rom_path: []const u8,
+};
+
+fn parseFixMariposaCommandArgs(args: []const []const u8) !FixMariposaCommandArgs {
+    var rom_path: ?[]const u8 = null;
+    const ParseState = enum {
+        init,
+        rom,
+    };
+    var parse_state: ParseState = .init;
+    for (args) |arg| {
+        switch (parse_state) {
+            .init => {
+                if (std.mem.eql(u8, arg, "--rom")) {
+                    parse_state = .rom;
+                } else {
+                    std.debug.print("Error: unexpected arg \"{s}\"\n", .{arg});
+                    return error.ParseArgsFailed;
+                }
+            },
+            .rom => {
+                rom_path = arg;
+                parse_state = .init;
+            },
+        }
+    }
+
+    return FixMariposaCommandArgs{
+        .rom_path = rom_path orelse {
+            std.debug.print("Error: No input rom path given with \"--rom\"\n", .{});
+            return error.ParseArgsFailed;
+        },
     };
 }
 
