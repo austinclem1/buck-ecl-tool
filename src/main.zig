@@ -92,7 +92,7 @@ fn printHelp() void {
         \\  extract-all --rom [input rom path] --out [output directory]
         \\    Extract all levels in rom as text ECL format to output directory
         \\
-        \\  patch-rom --rom [input rom path] --ecl [updated ecl path] --dest-level [rom level id to overwrite] --out [output rom path]
+        \\  patch-rom --rom [input rom path] --ecl [updated ecl path] --dest-level-id [rom level id to overwrite] --out [output rom path]
         \\    Patch specified level id in rom with the given text ECL file, writing the updated rom file to [out]
         \\
         \\  fix-mariposa --rom [input rom path]
@@ -178,7 +178,7 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
                     parse_state = .rom;
                 } else if (std.mem.eql(u8, arg, "--ecl")) {
                     parse_state = .ecl;
-                } else if (std.mem.eql(u8, arg, "--dest-level")) {
+                } else if (std.mem.eql(u8, arg, "--dest-level-id")) {
                     parse_state = .dest_level;
                 } else if (std.mem.eql(u8, arg, "--out")) {
                     parse_state = .out;
