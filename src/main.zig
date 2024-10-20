@@ -258,7 +258,7 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
         const bin_text = blk: {
             var fbs = std.io.fixedBufferStream(compressed_text);
             break :blk decoder.decompressAlloc(allocator, fbs.reader()) catch |err| {
-                fatal("failed to decompress script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
+                fatal("failed to decompress text section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
             };
         };
         defer allocator.free(bin_text);
