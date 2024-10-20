@@ -130,9 +130,9 @@ pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anyt
     return try out_buffer.toOwnedSlice();
 }
 
-pub fn decodeCode(self: *Decoder, code: u16, last_code: u16) (Allocator.Error || error{ReachedPrefixLengthLimit})!void {
+pub fn decodeCode(self: *Decoder, code: u16, last_code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
     // this can the length of the dictionary, indexing the entry that's about to be created
-    std.debug.assert(code <= self.dict.len);
+    if (code > self.dict.len) return error.InvalidCode;
     var cur_node: u16 = blk: {
         if (code == self.dict.len) {
             const prev_suffix = self.dict.items(.suffix)[self.dict.len - 1];
