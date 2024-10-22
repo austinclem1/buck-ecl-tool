@@ -14,20 +14,20 @@ levels was compressed.
 
 ## Utility Subcommands
 
-`extract-all --rom [YOUR ROM FILE] --out [DESTINATION DIR]`
+### `extract-all --rom [YOUR ROM FILE] --out [DESTINATION DIR]`
 This will generate a text file for every level in the rom in the specified
 output directory. **NOTE:** If you get an error regarding an invalid code while
 decompressing level id 97, you probably need to run the `fix-mariposa` command
 first, because of a compression bug in the original game data for that level.
 
-`patch-rom --rom [YOUR ROM FILE] --ecl [YOUR UPDATED ECL FILE] --dest-level-id [LEVEL ID TO PATCH] --out [PATH TO PUT PATCHED ROM]`
+### `patch-rom --rom [YOUR ROM FILE] --ecl [YOUR UPDATED ECL FILE] --dest-level-id [LEVEL ID TO PATCH] --out [PATH TO PUT PATCHED ROM]`
 This command will assemble and compress the given ecl text format file, then
 patch the specified level in the rom with that data. You'll get an error if the
 resulting data is too large to fit in the space taken up by the original data.
 The error messages regarding parsing the text format are pretty lacking
 unfortunately.
 
-`fix-mariposa --rom [YOUR ROM FILE]`
+### `fix-mariposa --rom [YOUR ROM FILE]`
 This will apply a fix to the compressed text data for level id 97 (Mariposa)
 that caused the decompression code to run on endlessly decompressing whatever
 random data happened to be past the actual level data.
@@ -64,7 +64,7 @@ var my_ptr_var: pointer @ 0x2000
 Each of these declare a variable of the specified size/type at the specified
 offset into the Genesis RAM.
 So in the example above, my_byte_var can be used to refer to a single byte at
-address 0xff1234. Genesis RAM begins at 0xff0000 and goes as high as 0xffffff.
+address 0xff1234 (Genesis RAM begins at 0xff0000 and goes as high as 0xffffff.)
 The type `pointer` could probably be more accurately called `address`, also it
 doesn't really exist *at* the specified location as much as it is an alias for
 that memory location (with no size associated with the data at that location).
@@ -77,8 +77,8 @@ command keyword, and is followed by zero or more arguments. Arguments can be
 one of the following:
 - integer literal i.e. `5`
 - string literal i.e. `"hello world"`
-- the name of a label i.e. `entry_point` only really makes sense for commands
-that branch, like GOTO, GOSUB, ONGOTO, and ONGOSUB
+- the name of a label i.e. `entry_point` usually used in commands that branch,
+like GOTO, GOSUB, ONGOTO, and ONGOSUB
 - byte, word, or dword sized var identifier i.e. `my_byte_var`
 - pointer var followed by an offset in square brackets, then suffixed with a
 character specifying what size of data to read or write at the resulting
@@ -110,23 +110,28 @@ header:
   entry_point
 
 var scratch_space: pointer @ 0x97f6
-var my_byte_var: byte @ 0x1000
+var hello_count: byte @ 0x9e6f
 
 my_do_nothing_label:
   EXIT
 start_step:
-  GOTO my_do_nothing_label
+  EXIT
 end_step:
-  COMPARE my_byte_var 20
-  IFEQ
   EXIT
-  ADD 1 my_byte_var my_byte_var
-  GOTO end_step
 entry_point:
-  SAVE 0 my_byte_var
-  SAVE 1234 scratch_space[2]w
-  EXIT
+  SAVE 1234 scratch_space[2]w // store 1234 as a word-size value at the address of scratch_space + 2
+  SAVE 0 hello_count // store value 0 at location of hello_count variable
+loop:
+  COMPARE hello_count 5
+  IFGE // only execute the following command if the previous comparison was greater than or equal
+  EXIT // finish executing commands, the game still continues
+  PRINTCLEAR "hello!"
+  CONTINUE // wait for player to press a button
+  ADD 1 hello_count hello_count // increment hello_count before looping
+  GOTO loop
 ```
+The above script prints "hello!" 5 times, waiting for the player to press a
+button between each iteration.
 
 ## Script Commands
 I got the names of all the commands as well as their argument counts from some
@@ -147,15 +152,15 @@ wrote the argument count.
 - ONGOSUB *label_index* *N* *[... N labels]*
 
 ### Arithmetic
-- ADD *op* *op* *dest*
-- SUBTRACT *op* *op* *dest*
-- DIVIDE *op* *op* *dest*
-- MULTIPLY *op* *op* *dest*
-- AND *op* *op* *dest*
-- OR *op* *op* *dest*
+- ADD *op1* *op2* *dest*
+- SUBTRACT *op1* *op2* *dest*
+- DIVIDE *op1* *op2* *dest*
+- MULTIPLY *op1* *op2* *dest*
+- AND *op1* *op2* *dest*
+- OR *op1* *op2* *dest*
 
 ### Conditionals
-- COMPARE *op* *op*
+- COMPARE *op1* *op2*
 - IFEQ
 - IFNE
 - IFLT
@@ -207,7 +212,7 @@ wrote the argument count.
 - SOUND 1
 - SAVECHARACTER
 - HOWFAR 2
-- FOR *start_i* *stop_i*
+- FOR *start_i* *stop1_i*
 - ENDFOR
 - HIDEITEMS 1
 - SKILLDAMAGE 6
