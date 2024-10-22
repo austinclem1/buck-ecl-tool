@@ -219,7 +219,7 @@ fn readCommandArgs(reader: anytype, command_tag: CommandTag, args: *std.ArrayLis
                 args.appendAssumeCapacity(arg);
             }
         },
-        .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
+        .HMENU, .WHMENU, .TREASURE, .NEWREGION, .ICONMENU => {
             const arg0 = try readArg(reader);
             const arg1 = try readArg(reader);
 
