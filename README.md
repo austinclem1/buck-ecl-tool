@@ -119,15 +119,15 @@ start_step:
 end_step:
   EXIT
 entry_point:
-  SAVE 1234 scratch_space[2]w // store 1234 as a word-size value at the address of scratch_space + 2
-  SAVE 0 hello_count // store value 0 at location of hello_count variable
+  SAVE 1234 scratch_space[2]w # store 1234 as a word-size value at the address of scratch_space + 2
+  SAVE 0 hello_count # store value 0 at location of hello_count variable
 loop:
   COMPARE hello_count 5
-  IFGE // only execute the following command if the previous comparison was greater than or equal
-  EXIT // finish executing commands, the game still continues
+  IFGE # only execute the following command if the previous comparison was greater than or equal
+  EXIT # finish executing commands, the game still continues
   PRINTCLEAR "hello!"
-  CONTINUE // wait for player to press a button
-  ADD 1 hello_count hello_count // increment hello_count before looping
+  CONTINUE # wait for player to press a button
+  ADD 1 hello_count hello_count # increment hello_count before looping
   GOTO loop
 ```
 The above script prints "hello!" 5 times, waiting for the player to press a
