@@ -145,6 +145,11 @@ pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFai
                 if (found_newline) try tokens.append(.{ .location = pos, .variant = .newline });
                 pos += read;
             },
+            '#' => {
+                const read, const found_newline = eatComment(buffer[pos..]);
+                if (found_newline) try tokens.append(.{ .location = pos, .variant = .newline });
+                pos += read;
+            },
             '"' => {
                 if (readString(buffer[pos..])) |result| {
                     const read, const string = result;
@@ -259,6 +264,23 @@ fn eatWhitespace(buffer: []const u8) struct { usize, bool } {
             else => {
                 break;
             },
+        }
+    }
+
+    return .{ pos, found_newline };
+}
+
+fn eatComment(buffer: []const u8) struct { usize, bool } {
+    var found_newline = false;
+
+    var pos: usize = 0;
+    while (pos < buffer.len) : (pos += 1) {
+        switch (buffer[pos]) {
+            '\n' => {
+                found_newline = true;
+                break;
+            },
+            else => {},
         }
     }
 
