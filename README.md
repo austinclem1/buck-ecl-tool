@@ -1,10 +1,11 @@
 # Buck Rogers ECL Script Extractor and Assembler
 
 Have you ever wanted to view and edit the scripting bytecode used in Strategic
-Simulations' 1991 Sega port of CRPG "Buck Rogers: Countdown to Doomsday?" ...No?
+Simulations' 1991 Sega port of CRPG "Buck Rogers: Countdown to Doomsday?" Of
+course you have!
 
 This is a command line tool that can decompress and disassemble the scripts for
-all the game levels in your legally obtained rom 👀. It will output each level
+all the game levels in your legally obtained 👀 rom. It will output each level
 as a separate file in a text format that reads top to bottom, resembling some
 form of assembly complete with labels GOTOs. From there you can edit the files
 and use this tool to assemble, compress, then patch your rom with the updated
@@ -14,20 +15,26 @@ levels was compressed.
 
 ## Utility Subcommands
 
-### `extract-all --rom [YOUR ROM FILE] --out [DESTINATION DIR]`
+```
+extract-all --rom [YOUR ROM FILE] --out [DESTINATION DIR]
+```
 This will generate a text file for every level in the rom in the specified
 output directory. **NOTE:** If you get an error regarding an invalid code while
 decompressing level id 97, you probably need to run the `fix-mariposa` command
 first, because of a compression bug in the original game data for that level.
 
-### `patch-rom --rom [YOUR ROM FILE] --ecl [YOUR UPDATED ECL FILE] --dest-level-id [LEVEL ID TO PATCH] --out [PATH TO PUT PATCHED ROM]`
+```
+patch-rom --rom [YOUR ROM FILE] --ecl [YOUR UPDATED ECL FILE] --dest-level-id [LEVEL ID TO PATCH] --out [PATH TO PUT PATCHED ROM]
+```
 This command will assemble and compress the given ecl text format file, then
 patch the specified level in the rom with that data. You'll get an error if the
 resulting data is too large to fit in the space taken up by the original data.
 The error messages regarding parsing the text format are pretty lacking
 unfortunately.
 
-### `fix-mariposa --rom [YOUR ROM FILE]`
+```
+fix-mariposa --rom [YOUR ROM FILE]
+```
 This will apply a fix to the compressed text data for level id 97 (Mariposa)
 that caused the decompression code to run on endlessly decompressing whatever
 random data happened to be past the actual level data.
@@ -65,9 +72,21 @@ Each of these declare a variable of the specified size/type at the specified
 offset into the Genesis RAM.
 So in the example above, my_byte_var can be used to refer to a single byte at
 address 0xff1234 (Genesis RAM begins at 0xff0000 and goes as high as 0xffffff.)
-The type `pointer` could probably be more accurately called `address`, also it
-doesn't really exist *at* the specified location as much as it is an alias for
-that memory location (with no size associated with the data at that location).
+The type `pointer` doesn't specify what type of data it points to. You could
+generally look at it as a pointer to a one or more bytes though. When a
+pointer-typed var is used in certain commands like SAVE and COMPARE, it's
+treated as a pointer to a series of bytes. You can use the freaky "dereference"
+syntax to access a value of the desired size and offset from that pointer
+address. Here's an example of using the dereference syntaxt to read a value
+from a pointer variable. We're using the PICTURE command to update the graphic
+in the game's UI. The command takes one argument, the numeric ID of which
+graphic to use. We're going to go 1 byte past whatever address the pointer
+variable points to, and read a word sized (2 bytes) value from there:
+```
+PICTURE my_ptr_var[1]w
+```
+The `1` means advance past the address by one byte, and the `w` means
+"word sized value"
 
 ### Command Blocks
 
@@ -123,11 +142,13 @@ entry_point:
   SAVE 0 hello_count # store value 0 at location of hello_count variable
 loop:
   COMPARE hello_count 5
-  IFGE # only execute the following command if the previous comparison was greater than or equal
+  IFGE # only execute EXIT if the previous COMPARE was greater than or equal
   EXIT # finish executing commands, the game still continues
   PRINTCLEAR "hello!"
   CONTINUE # wait for player to press a button
-  ADD 1 hello_count hello_count # increment hello_count before looping
+
+  # increment hello_count before looping
+  ADD 1 hello_count hello_count
   GOTO loop
 ```
 The above script prints "hello!" 5 times, waiting for the player to press a
@@ -238,7 +259,7 @@ wrote the argument count.
 - JOURNAL 2
 - ICONMENU *choice_dest* *N* *[...N choice icon ids]*
 
-### Not Implemented for SEGA
+### Not Implemented for SEGA Version
 - INPUTSTRING 3
 - MENU
 - SETTIMER 2
