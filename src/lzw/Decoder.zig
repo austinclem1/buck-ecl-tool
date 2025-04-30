@@ -10,9 +10,12 @@ allocator: Allocator,
 bit_buffer: u32,
 bit_buffer_open_bits: u6,
 dict: MultiArrayList(DictEntry),
-decoding_scratch_space: ArrayListUnmanaged(u8),
+decoding_buffer: ArrayListUnmanaged(u8),
 
 cur_code_width: u4,
+
+on_first_code: bool,
+last_code: u16,
 
 const initial_code_width = 9;
 const max_code_width = 12;
@@ -52,14 +55,16 @@ pub fn init(allocator: Allocator) Allocator.Error!Decoder {
         .bit_buffer = 0,
         .bit_buffer_open_bits = bit_buffer_capacity,
         .dict = dict,
-        .decoding_scratch_space = ArrayListUnmanaged(u8){},
+        .decoding_buffer = ArrayListUnmanaged(u8){},
         .cur_code_width = initial_code_width,
+        .on_first_code = true,
+        .last_code = undefined,
     };
 }
 
 pub fn deinit(self: *Decoder) void {
     self.dict.deinit(self.allocator);
-    self.decoding_scratch_space.deinit(self.allocator);
+    self.decoding_buffer.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -67,25 +72,37 @@ pub fn resetClearingCapacity(self: *Decoder) void {
     self.bit_buffer = 0;
     self.bit_buffer_open_bits = bit_buffer_capacity;
     self.dict.shrinkAndFree(self.allocator, dict_initial_len);
-    self.decoding_scratch_space.clearAndFree(self.allocator);
+    self.decoding_buffer.clearAndFree(self.allocator);
     self.cur_code_width = initial_code_width;
+    self.on_first_code = true;
+    self.last_code = undefined;
 }
 
 pub fn resetRetainingCapacity(self: *Decoder) void {
     self.bit_buffer = 0;
     self.bit_buffer_open_bits = bit_buffer_capacity;
     self.dict.shrinkRetainingCapacity(dict_initial_len);
-    self.decoding_scratch_space.clearRetainingCapacity();
+    self.decoding_buffer.clearRetainingCapacity();
     self.cur_code_width = initial_code_width;
+    self.on_first_code = true;
+    self.last_code = undefined;
 }
 
-pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anytype) ![]u8 {
-    var out_buffer = ArrayList(u8).init(result_allocator);
-    errdefer out_buffer.deinit();
+pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anytype, max_size: ?usize) ![]u8 {
+    var output = ArrayList(u8).init(result_allocator);
+    errdefer output.deinit();
 
-    var on_first_code = true;
-    var last_code: u16 = undefined;
-    while (true) {
+    main_loop: while (true) {
+        if (self.decoding_buffer.items.len > 0) {
+            while (self.decoding_buffer.pop()) |ch| {
+                try output.append(ch);
+                if (max_size) |max| {
+                    if (output.items.len >= max) break :main_loop;
+                }
+            }
+            continue :main_loop;
+        }
+
         const code = try self.readCode(reader);
 
         if (code == end_code) break;
@@ -93,27 +110,30 @@ pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anyt
         if (code == clear_code) {
             self.dict.shrinkRetainingCapacity(dict_initial_len);
             self.cur_code_width = initial_code_width;
-            last_code = undefined;
-            on_first_code = true;
+            self.last_code = undefined;
+            self.on_first_code = true;
             continue;
         }
 
-        try self.decodeCode(code, last_code);
+        try self.decodeCode(code);
 
-        const new_entry_suffix = self.decoding_scratch_space.getLast();
+        const new_entry_suffix = self.decoding_buffer.getLast();
 
-        while (self.decoding_scratch_space.pop()) |ch| {
-            try out_buffer.append(ch);
+        while (self.decoding_buffer.pop()) |ch| {
+            try output.append(ch);
+            if (max_size) |max| {
+                if (output.items.len >= max) break :main_loop;
+            }
         }
 
-        if (on_first_code) {
-            on_first_code = false;
-            last_code = code;
-            continue;
+        if (self.on_first_code) {
+            self.on_first_code = false;
+            self.last_code = code;
+            continue :main_loop;
         }
 
         if (self.dict.len < dict_max_len) {
-            self.dict.appendAssumeCapacity(.{ .prefix = last_code, .suffix = new_entry_suffix });
+            self.dict.appendAssumeCapacity(.{ .prefix = self.last_code, .suffix = new_entry_suffix });
 
             const code_widening_threshold = (@as(u16, 1) << self.cur_code_width) - 1;
             const should_widen_code = self.dict.len == code_widening_threshold and self.cur_code_width < max_code_width;
@@ -124,20 +144,22 @@ pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anyt
             }
         }
 
-        last_code = code;
+        self.last_code = code;
     }
 
-    return try out_buffer.toOwnedSlice();
+    return try output.toOwnedSlice();
 }
 
-pub fn decodeCode(self: *Decoder, code: u16, last_code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
+pub fn decodeCode(self: *Decoder, code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
     // this can the length of the dictionary, indexing the entry that's about to be created
-    if (code > self.dict.len) return error.InvalidCode;
+    if (code > self.dict.len) {
+        return error.InvalidCode;
+    }
     var cur_node: u16 = blk: {
         if (code == self.dict.len) {
             const prev_suffix = self.dict.items(.suffix)[self.dict.len - 1];
-            try self.decoding_scratch_space.append(self.allocator, prev_suffix);
-            break :blk last_code;
+            try self.decoding_buffer.append(self.allocator, prev_suffix);
+            break :blk self.last_code;
         } else {
             break :blk code;
         }
@@ -145,9 +167,9 @@ pub fn decodeCode(self: *Decoder, code: u16, last_code: u16) (Allocator.Error ||
 
     while (cur_node != prefix_end_sentinal) {
         const character = self.dict.items(.suffix)[cur_node];
-        try self.decoding_scratch_space.append(self.allocator, character);
+        try self.decoding_buffer.append(self.allocator, character);
 
-        if (self.decoding_scratch_space.items.len >= max_prefix_len) {
+        if (self.decoding_buffer.items.len >= max_prefix_len) {
             return error.ReachedPrefixLengthLimit;
         }
 
