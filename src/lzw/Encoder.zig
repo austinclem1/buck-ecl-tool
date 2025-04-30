@@ -97,7 +97,7 @@ fn maybeUpdateDictAndCodeWidth(self: *Encoder, suffix: u8) Allocator.Error!void 
         return;
     }
 
-    const new_entry = .{ .prefix = self.cur_prefix, .suffix = suffix };
+    const new_entry = DictEntry{ .prefix = self.cur_prefix, .suffix = suffix };
     try self.dict.append(self.arena.allocator(), new_entry);
 
     const code_widening_threshold = (@as(u16, 1) << @intCast(self.code_width));

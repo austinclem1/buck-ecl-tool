@@ -102,7 +102,7 @@ pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anyt
 
         const new_entry_suffix = self.decoding_scratch_space.getLast();
 
-        while (self.decoding_scratch_space.popOrNull()) |ch| {
+        while (self.decoding_scratch_space.pop()) |ch| {
             try out_buffer.append(ch);
         }
 
@@ -211,7 +211,7 @@ fn debugPrintDict(self: *const Decoder) void {
             stack.append(char) catch unreachable;
             cur_node = self.dict.items(.prefix)[cur_node];
         }
-        while (stack.popOrNull()) |char| {
+        while (stack.pop()) |char| {
             std.debug.print("{c}", .{char});
         }
         std.debug.print("\n", .{});

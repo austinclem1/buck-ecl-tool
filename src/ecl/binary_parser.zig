@@ -275,7 +275,7 @@ const known_var_map = blk: {
     var kvs: [known_vars.len]KVTuple = undefined;
     for (known_vars, 0..) |v, i| {
         const name, const var_type, const address = v;
-        const var_use = .{ .address = address, .var_type = var_type };
+        const var_use = VarUse{ .address = address, .var_type = var_type };
         kvs[i] = .{ var_use, name };
     }
 
