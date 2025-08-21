@@ -6,16 +6,20 @@ const File = std.fs.File;
 const ecl = @import("ecl.zig");
 const lzw = @import("lzw.zig");
 
-const GPA = std.heap.GeneralPurposeAllocator(.{});
-
 const ecl_base: u16 = 0x6af6;
 
 const tokenize = @import("ecl/tokenize.zig");
 
 pub fn main() !void {
-    var gpa = GPA{};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    // var f = try std.fs.cwd().openFile("lastfuzzinput", .{});
+    // defer f.close();
+    // const input = try f.readToEndAlloc(allocator, 0x100000);
+    // defer allocator.free(input);
+    // // try testEncodeDecode(allocator, &@as([1000]u8, @splat(0)));
+    // try testEncodeDecode(allocator, input);
 
     const args = std.process.argsAlloc(allocator) catch {
         std.debug.print("Failed to allocate process args\n", .{});
@@ -246,20 +250,26 @@ fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
         var decoder = lzw.Decoder.init(allocator) catch |err| {
             fatal("failed to initialize lzw decoder, error: {s}\n", .{@errorName(err)});
         };
-        defer decoder.deinit();
+        defer decoder.deinit(allocator);
         const bin_script = blk: {
             var fbs = std.io.fixedBufferStream(compressed_script);
-            break :blk decoder.decompressAlloc(allocator, fbs.reader(), null) catch |err| {
+            var output = std.ArrayList(u8).init(allocator);
+            errdefer output.deinit();
+            decoder.decompress(fbs.reader(), output.writer(), null) catch |err| {
                 fatal("failed to decompress script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
             };
+            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
         };
         defer allocator.free(bin_script);
-        decoder.resetRetainingCapacity();
+        decoder.reset();
         const bin_text = blk: {
             var fbs = std.io.fixedBufferStream(compressed_text);
-            break :blk decoder.decompressAlloc(allocator, fbs.reader(), null) catch |err| {
+            var output = std.ArrayList(u8).init(allocator);
+            errdefer output.deinit();
+            decoder.decompress(fbs.reader(), output.writer(), null) catch |err| {
                 fatal("failed to decompress text section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
             };
+            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
         };
         defer allocator.free(bin_text);
         const init_highest = if (id == 0x60) 0x907 + ecl_base else null;
@@ -325,10 +335,14 @@ fn patchRomCommand(allocator: Allocator, args: PatchRomCommandArgs) void {
             var encoder = lzw.Encoder.init(allocator) catch |err| {
                 fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
             };
-            defer encoder.deinit();
-            break :blk encoder.compressAlloc(allocator, ecl_binary.script) catch |err| {
+            defer encoder.deinit(allocator);
+            var fbs = std.io.fixedBufferStream(ecl_binary.script);
+            var output = std.ArrayList(u8).init(allocator);
+            defer output.deinit();
+            encoder.compress(output.writer(), fbs.reader()) catch |err| {
                 fatal("failed to compress ecl binary script data, error: {s}\n", .{@errorName(err)});
             };
+            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
         };
         defer allocator.free(compressed_script);
 
@@ -349,10 +363,14 @@ fn patchRomCommand(allocator: Allocator, args: PatchRomCommandArgs) void {
             var encoder = lzw.Encoder.init(allocator) catch |err| {
                 fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
             };
-            defer encoder.deinit();
-            break :blk encoder.compressAlloc(allocator, ecl_binary.text) catch |err| {
+            defer encoder.deinit(allocator);
+            var fbs = std.io.fixedBufferStream(ecl_binary.text);
+            var output = std.ArrayList(u8).init(allocator);
+            defer output.deinit();
+            encoder.compress(output.writer(), fbs.reader()) catch |err| {
                 fatal("failed to compress ecl binary text data, error: {s}\n", .{@errorName(err)});
             };
+            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
         };
         defer allocator.free(compressed_text);
 
@@ -454,4 +472,41 @@ fn fixRomChecksum(seekable_stream: anytype) !void {
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.log.err(format, args);
     std.process.exit(1);
+}
+
+test "fuzz there and back" {
+    // return std.testing.fuzz({}, testEncodeDecode, .{});
+    return std.testing.fuzz(std.testing.allocator, testEncodeDecode, .{});
+}
+
+fn testEncodeDecode(context: std.mem.Allocator, input: []const u8) anyerror!void {
+    // _ = context;
+    const allocator = context;
+    // var f = try std.fs.cwd().createFile("~/projects/buck-ecl-tool/lastfuzzinput", .{});
+    var f = try std.fs.cwd().createFile("lastfuzzinput", .{});
+    defer f.close();
+    try f.writer().writeAll(input);
+    
+    // const allocator = std.testing.allocator;
+    var encoder = try lzw.Encoder.init(allocator);
+    defer encoder.deinit(allocator);
+    var decoder = try lzw.Decoder.init(allocator);
+    defer decoder.deinit(allocator);
+
+    var compressed = std.ArrayList(u8).init(allocator);
+    defer compressed.deinit();
+    {
+        var fbs = std.io.fixedBufferStream(input);
+        try encoder.compress(compressed.writer(), fbs.reader());
+        // try compressed.appendSlice("\x00\x00\x00\x00");
+    }
+    
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+    {
+        var fbs = std.io.fixedBufferStream(compressed.items);
+        try decoder.decompress(fbs.reader(), output.writer(), null);
+    }
+    try std.testing.expectEqualSlices(u8, std.mem.trimRight(u8, input, "\x00"), std.mem.trimRight(u8, output.items, "\x00"));
+    // try std.testing.expectEqualSlices(u8, input, output.items);
 }

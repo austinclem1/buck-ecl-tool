@@ -1,55 +1,62 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const MultiArrayList = std.MultiArrayList;
+
+const BitBuffer = @import("BitBuffer.zig");
 
 pub const Encoder = @This();
 
-bit_buffer: BitBuffer = .{},
-arena: std.heap.ArenaAllocator,
+bit_buffer: BitBuffer,
 dict: std.MultiArrayList(DictEntry),
-code_width: u4 = initial_code_width,
-cur_prefix: u16 = 0,
-on_first_byte: bool = true,
+code_width: u4,
+cur_prefix: u16,
+on_first_byte: bool,
 
 const initial_code_width = 9;
 const max_code_width = 12;
 const clear_code = 0x100;
 const end_code = 0x101;
 const dict_max_len = (@as(u16, 1) << @intCast(max_code_width)) - 1;
+const dict_initial_len = 0x100 + 2; // all u8 vals + clear and end codes
 
 const DictEntry = struct {
     prefix: u16,
     suffix: u8,
 };
 
-pub fn init(backing_allocator: Allocator) Allocator.Error!Encoder {
-    var e = Encoder{
-        .arena = std.heap.ArenaAllocator.init(backing_allocator),
-        .dict = .{},
-    };
-    errdefer e.arena.deinit();
+pub fn init(allocator: Allocator) Allocator.Error!Encoder {
+    var dict: MultiArrayList(DictEntry) = .empty;
+    errdefer dict.deinit(allocator);
+    try dict.setCapacity(allocator, dict_max_len);
 
-    try e.dict.ensureUnusedCapacity(e.arena.allocator(), end_code + 1);
     for (0..0x100) |i| {
-        e.dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = @intCast(i) });
+        dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = @intCast(i) });
     }
     // add dummy entries for CLEAR and END codes
-    e.dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = 0 });
-    e.dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = 0 });
+    dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = 0 });
+    dict.appendAssumeCapacity(.{ .prefix = 0, .suffix = 0 });
 
-    return e;
+    std.debug.assert(dict.len == dict_initial_len);
+
+    return .{
+        .bit_buffer = .empty,
+        .dict = dict,
+        .code_width = initial_code_width,
+        .cur_prefix = 0,
+        .on_first_byte = true,
+    };
 }
 
-pub fn deinit(self: *Encoder) void {
-    self.arena.deinit();
+pub fn deinit(self: *Encoder, allocator: Allocator) void {
+    self.dict.deinit(allocator);
     self.* = undefined;
 }
 
-pub fn compressAlloc(self: *Encoder, allocator: Allocator, input_bytes: []const u8) ![]u8 {
-    var out_buffer = std.ArrayList(u8).init(allocator);
-    defer out_buffer.deinit();
+pub fn compress(self: *Encoder, writer: anytype, reader: anytype) !void {
+    var counting_writer = std.io.countingWriter(writer);
 
-    for (input_bytes) |ch| {
+    while (reader.readByte()) |ch| {
         if (self.on_first_byte) {
             self.on_first_byte = false;
             self.cur_prefix = ch;
@@ -59,36 +66,36 @@ pub fn compressAlloc(self: *Encoder, allocator: Allocator, input_bytes: []const 
         if (self.indexOfMatchingEntry(self.cur_prefix, ch)) |match| {
             self.cur_prefix = match;
         } else {
-            try self.writeCode(self.cur_prefix, out_buffer.writer());
+            try self.writeCode(self.cur_prefix, counting_writer.writer());
             try self.maybeUpdateDictAndCodeWidth(ch);
             self.cur_prefix = ch;
         }
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => return err,
     }
 
-    try self.writeCode(self.cur_prefix, out_buffer.writer());
-    try self.writeCode(end_code, out_buffer.writer());
+    try self.writeCode(self.cur_prefix, counting_writer.writer());
+    try self.writeCode(end_code, counting_writer.writer());
 
-    const remaining_bits = self.bit_buffer.readAll();
-    try out_buffer.writer().writeInt(u32, remaining_bits, .big);
-    if (out_buffer.items.len % 2 == 1) try out_buffer.append(0);
-
-    return try out_buffer.toOwnedSlice();
+    try self.bit_buffer.flush(counting_writer.writer());
+    if (counting_writer.bytes_written % 2 == 1) try counting_writer.writer().writeByte(0);
+    try counting_writer.writer().writeByte(0);
+    try counting_writer.writer().writeByte(0);
+    try counting_writer.writer().writeByte(0);
+    try counting_writer.writer().writeByte(0);
 }
 
 fn writeCode(self: *Encoder, code: u16, writer: anytype) !void {
-    while (self.bit_buffer.readByte()) |byte| {
-        try writer.writeByte(byte);
-    }
-
     const lower_bits_mask = (@as(u16, 1) << @intCast(self.code_width - 1)) - 1;
 
     const dict_len_masked = (self.dict.len - 1) & lower_bits_mask;
     const code_masked = code & lower_bits_mask;
 
-    try self.bit_buffer.writeBits(code_masked, self.code_width - 1);
+    try self.bit_buffer.writeNBits(code_masked, self.code_width - 1, writer);
     if (code_masked <= dict_len_masked) {
-        const most_sig_bit = getBitAt(code, @intCast(self.code_width - 1));
-        try self.bit_buffer.writeBits(most_sig_bit, 1);
+        const most_sig_bit = code >> (self.code_width - 1);
+        try self.bit_buffer.writeNBits(most_sig_bit, 1, writer);
     }
 }
 
@@ -98,7 +105,7 @@ fn maybeUpdateDictAndCodeWidth(self: *Encoder, suffix: u8) Allocator.Error!void 
     }
 
     const new_entry = DictEntry{ .prefix = self.cur_prefix, .suffix = suffix };
-    try self.dict.append(self.arena.allocator(), new_entry);
+    self.dict.appendAssumeCapacity(new_entry);
 
     const code_widening_threshold = (@as(u16, 1) << @intCast(self.code_width));
     if (self.dict.len >= code_widening_threshold and self.code_width < max_code_width) {
@@ -119,66 +126,3 @@ fn indexOfMatchingEntry(self: *Encoder, prefix: u16, suffix: u8) ?u16 {
 
     return null;
 }
-
-fn getBitAt(val: u16, index: u4) u1 {
-    return @intCast((val >> index) & 1);
-}
-
-const BitBuffer = struct {
-    backing_int: u32 = 0,
-    open_bits: u6 = bit_size,
-
-    const bit_size = 32;
-
-    pub fn writeBits(self: *BitBuffer, val: u32, bit_count: u6) !void {
-        if (self.open_bits < bit_count) return error.OutOfSpace;
-
-        const shift_amt: u5 = @intCast(self.open_bits - bit_count);
-        self.backing_int |= (val << shift_amt);
-        self.open_bits -= bit_count;
-    }
-
-    pub fn readByte(self: *BitBuffer) ?u8 {
-        if (self.open_bits > (bit_size - 8)) return null;
-
-        const byte: u8 = @intCast(self.backing_int >> (bit_size - 8));
-
-        self.backing_int <<= 8;
-        self.open_bits += 8;
-
-        return byte;
-    }
-
-    pub fn readAll(self: *BitBuffer) u32 {
-        const result = self.backing_int;
-        self.backing_int = 0;
-        self.open_bits = bit_size;
-        return result;
-    }
-};
-
-// pub fn debugPrintDict(self: *const Self) void {
-//     var start: usize = end_code + 1;
-//     while (start < self.dict.len) : (start += 0x10) {
-//         const end = @min(start + 0x10, self.dict.len);
-//
-//         std.debug.print("0x{x}:\n", .{start});
-//         for (self.dict.items(.suffix)[start..end]) |s| {
-//             if (std.ascii.isPrint(s)) {
-//                 std.debug.print("\'{c}\' ", .{s});
-//             } else {
-//                 std.debug.print("{x:0>3} ", .{s});
-//             }
-//         }
-//         std.debug.print("\n", .{});
-//
-//         for (self.dict.items(.prefix)[start..end]) |p| {
-//             if (p < 128 and std.ascii.isPrint(@intCast(p))) {
-//                 std.debug.print("\'{c}\' ", .{@as(u8, @intCast(p))});
-//             } else {
-//                 std.debug.print("{x:0>3} ", .{p});
-//             }
-//         }
-//         std.debug.print("\n\n", .{});
-//     }
-// }

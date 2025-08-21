@@ -4,18 +4,17 @@ const ArrayList = std.ArrayList;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const MultiArrayList = std.MultiArrayList;
 
+const BitBuffer = @import("BitBuffer.zig");
+
 pub const Decoder = @This();
 
-allocator: Allocator,
-bit_buffer: u32,
-bit_buffer_open_bits: u6,
+bit_buffer: BitBuffer,
 dict: MultiArrayList(DictEntry),
 decoding_buffer: ArrayListUnmanaged(u8),
-
 cur_code_width: u4,
-
 on_first_code: bool,
-last_code: u16,
+previous_code: u16,
+new_entry_suffix: u8,
 
 const initial_code_width = 9;
 const max_code_width = 12;
@@ -23,14 +22,11 @@ const max_code_width = 12;
 const clear_code = 0x100;
 const end_code = 0x101;
 
+const dict_initial_len = 0x100 + 2; // all u8 vals + clear and end codes
+const dict_max_len: u16 = (1 << max_code_width) - 1;
+
 const max_prefix_len = 0x1000;
 const prefix_end_sentinal = std.math.maxInt(u16);
-
-const bit_buffer_capacity = @bitSizeOf(u32);
-
-const dict_initial_len = end_code + 1;
-const dict_initial_capacity: u16 = (1 << initial_code_width) - 1;
-const dict_max_len: u16 = (1 << max_code_width) - 1;
 
 const DictEntry = struct {
     prefix: u16,
@@ -38,10 +34,10 @@ const DictEntry = struct {
 };
 
 pub fn init(allocator: Allocator) Allocator.Error!Decoder {
-    var dict = MultiArrayList(DictEntry){};
+    var dict: MultiArrayList(DictEntry) = .empty;
     errdefer dict.deinit(allocator);
 
-    try dict.ensureTotalCapacity(allocator, dict_initial_capacity);
+    try dict.setCapacity(allocator, dict_max_len);
 
     for (0..0x100) |i| {
         dict.appendAssumeCapacity(.{ .prefix = prefix_end_sentinal, .suffix = @intCast(i) });
@@ -50,155 +46,135 @@ pub fn init(allocator: Allocator) Allocator.Error!Decoder {
     dict.appendAssumeCapacity(.{ .prefix = prefix_end_sentinal, .suffix = 0 });
     dict.appendAssumeCapacity(.{ .prefix = prefix_end_sentinal, .suffix = 0 });
 
+    std.debug.assert(dict.len == dict_initial_len);
+
+    var decoding_buffer = try ArrayListUnmanaged(u8).initCapacity(allocator, max_prefix_len);
+    errdefer decoding_buffer.deinit(allocator);
+
     return Decoder{
-        .allocator = allocator,
-        .bit_buffer = 0,
-        .bit_buffer_open_bits = bit_buffer_capacity,
+        .bit_buffer = .empty,
         .dict = dict,
-        .decoding_buffer = ArrayListUnmanaged(u8){},
+        .decoding_buffer = decoding_buffer,
         .cur_code_width = initial_code_width,
         .on_first_code = true,
-        .last_code = undefined,
+        .previous_code = undefined,
+        .new_entry_suffix = undefined,
     };
 }
 
-pub fn deinit(self: *Decoder) void {
-    self.dict.deinit(self.allocator);
-    self.decoding_buffer.deinit(self.allocator);
+pub fn deinit(self: *Decoder, allocator: Allocator) void {
+    self.dict.deinit(allocator);
+    self.decoding_buffer.deinit(allocator);
     self.* = undefined;
 }
 
-pub fn resetClearingCapacity(self: *Decoder) void {
-    self.bit_buffer = 0;
-    self.bit_buffer_open_bits = bit_buffer_capacity;
-    self.dict.shrinkAndFree(self.allocator, dict_initial_len);
-    self.decoding_buffer.clearAndFree(self.allocator);
-    self.cur_code_width = initial_code_width;
-    self.on_first_code = true;
-    self.last_code = undefined;
-}
-
-pub fn resetRetainingCapacity(self: *Decoder) void {
-    self.bit_buffer = 0;
-    self.bit_buffer_open_bits = bit_buffer_capacity;
+pub fn reset(self: *Decoder) void {
     self.dict.shrinkRetainingCapacity(dict_initial_len);
     self.decoding_buffer.clearRetainingCapacity();
-    self.cur_code_width = initial_code_width;
-    self.on_first_code = true;
-    self.last_code = undefined;
+    self.* = .{
+        .bit_buffer = .empty,
+        .dict = self.dict,
+        .decoding_buffer = self.decoding_buffer,
+        .cur_code_width = initial_code_width,
+        .on_first_code = true,
+        .previous_code = undefined,
+        .new_entry_suffix = undefined,
+    };
 }
 
-pub fn decompressAlloc(self: *Decoder, result_allocator: Allocator, reader: anytype, max_size: ?usize) ![]u8 {
-    var output = ArrayList(u8).init(result_allocator);
-    errdefer output.deinit();
+pub fn decompress(self: *Decoder, reader_: anytype, writer: anytype, optional_max_size: ?usize) !void {
+    var counting_reader = std.io.countingReader(reader_);
+    const reader = counting_reader.reader();
+    var counting_writer = std.io.countingWriter(writer);
 
     main_loop: while (true) {
-        if (self.decoding_buffer.items.len > 0) {
-            while (self.decoding_buffer.pop()) |ch| {
-                try output.append(ch);
-                if (max_size) |max| {
-                    if (output.items.len >= max) break :main_loop;
-                }
+        if (optional_max_size) |max_size| {
+            const space_remaining = max_size - counting_writer.bytes_written;
+            const bytes_to_write = @min(self.decoding_buffer.items.len, space_remaining);
+            for (0..bytes_to_write) |_| {
+                const ch = self.decoding_buffer.pop().?;
+                try counting_writer.writer().writeByte(ch);
             }
-            continue :main_loop;
+            if (counting_writer.bytes_written >= max_size) break :main_loop;
+        } else {
+            while (self.decoding_buffer.pop()) |ch| {
+                try counting_writer.writer().writeByte(ch);
+            }
         }
 
         const code = try self.readCode(reader);
 
-        if (code == end_code) break;
+        if (code == end_code) break :main_loop;
 
         if (code == clear_code) {
+            // `bit_buffer` and `decoding_buffer` may still have data that
+            // hasn't been flushed yet, so they aren't reinitialized
             self.dict.shrinkRetainingCapacity(dict_initial_len);
-            self.cur_code_width = initial_code_width;
-            self.last_code = undefined;
-            self.on_first_code = true;
-            continue;
+            self.* = .{
+                .bit_buffer = self.bit_buffer,
+                .dict = self.dict,
+                .decoding_buffer = self.decoding_buffer,
+                .cur_code_width = initial_code_width,
+                .on_first_code = true,
+                .previous_code = undefined,
+                .new_entry_suffix = undefined,
+            };
+            continue :main_loop;
         }
 
-        try self.decodeCode(code);
-
-        const new_entry_suffix = self.decoding_buffer.getLast();
-
-        while (self.decoding_buffer.pop()) |ch| {
-            try output.append(ch);
-            if (max_size) |max| {
-                if (output.items.len >= max) break :main_loop;
-            }
-        }
+        try self.expandCode(code);
+        self.new_entry_suffix = self.decoding_buffer.getLast();
 
         if (self.on_first_code) {
             self.on_first_code = false;
-            self.last_code = code;
+            self.previous_code = code;
             continue :main_loop;
         }
 
         if (self.dict.len < dict_max_len) {
-            self.dict.appendAssumeCapacity(.{ .prefix = self.last_code, .suffix = new_entry_suffix });
+            self.dict.appendAssumeCapacity(.{ .prefix = self.previous_code, .suffix = self.new_entry_suffix });
 
             const code_widening_threshold = (@as(u16, 1) << self.cur_code_width) - 1;
-            const should_widen_code = self.dict.len == code_widening_threshold and self.cur_code_width < max_code_width;
+            const should_widen_code = self.dict.len >= code_widening_threshold and self.cur_code_width < max_code_width;
             if (should_widen_code) {
                 self.cur_code_width += 1;
-                const new_capacity = (@as(u16, 1) << self.cur_code_width) - 1;
-                try self.dict.ensureTotalCapacity(self.allocator, new_capacity);
             }
         }
 
-        self.last_code = code;
+        self.previous_code = code;
     }
-
-    return try output.toOwnedSlice();
 }
 
-pub fn decodeCode(self: *Decoder, code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
-    // this can the length of the dictionary, indexing the entry that's about to be created
+fn expandCode(self: *Decoder, code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
+    std.debug.assert(code != clear_code);
+    std.debug.assert(code != end_code);
+
+    // this can be the length of the dictionary, indexing the entry that's about to be created
     if (code > self.dict.len) {
         return error.InvalidCode;
     }
-    var cur_node: u16 = blk: {
-        if (code == self.dict.len) {
-            const prev_suffix = self.dict.items(.suffix)[self.dict.len - 1];
-            try self.decoding_buffer.append(self.allocator, prev_suffix);
-            break :blk self.last_code;
-        } else {
-            break :blk code;
-        }
-    };
+    
+    var cur_node_idx: u16 = undefined;
+    if (code == self.dict.len) {
+        if (self.on_first_code) return error.InvalidCode;
+        self.decoding_buffer.appendAssumeCapacity(self.new_entry_suffix);
+        cur_node_idx = self.previous_code;
+    } else {
+        cur_node_idx = code;
+    }
 
-    while (cur_node != prefix_end_sentinal) {
-        const character = self.dict.items(.suffix)[cur_node];
-        try self.decoding_buffer.append(self.allocator, character);
-
-        if (self.decoding_buffer.items.len >= max_prefix_len) {
-            return error.ReachedPrefixLengthLimit;
-        }
-
-        cur_node = self.dict.items(.prefix)[cur_node];
+    while (cur_node_idx != prefix_end_sentinal) {
+        const entry = self.dict.get(cur_node_idx);
+        self.decoding_buffer.appendAssumeCapacity(entry.suffix);
+        cur_node_idx = entry.prefix;
     }
 }
 
-fn readCode(self: *Decoder, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!u16 {
-    // read bytes until bit_buffer is too full to add any more
-    while (self.bit_buffer_open_bits >= 8) {
-        const new_byte = try reader.readByte();
-
-        const initial_offset = 8;
-        const desired_offset = self.bit_buffer_open_bits;
-        const desired_offset_delta: u5 = @intCast(desired_offset - initial_offset);
-
-        const new_byte_shifted = @as(u32, new_byte) << desired_offset_delta;
-
-        self.bit_buffer |= new_byte_shifted;
-
-        self.bit_buffer_open_bits -= 8;
-    }
+fn readCode(self: *Decoder, reader: anytype) !u16 {
+    try self.bit_buffer.fill(reader);
 
     const short_code_width = self.cur_code_width - 1;
-    const shift_right_amount: u5 = @intCast(@as(u6, bit_buffer_capacity) - short_code_width);
-    var code: u16 = @intCast(self.bit_buffer >> shift_right_amount);
-
-    self.bit_buffer <<= short_code_width;
-    self.bit_buffer_open_bits += short_code_width;
+    var code: u16 = @intCast(self.bit_buffer.takeNBits(short_code_width));
 
     const might_index_dict_upper_portion = blk: {
         // the wrapping subtraction is necessary, right after the cur_code_width widens this will
@@ -209,14 +185,9 @@ fn readCode(self: *Decoder, reader: anytype) (@TypeOf(reader).Error || error{End
     };
 
     if (might_index_dict_upper_portion) {
-        const ov = @shlWithOverflow(self.bit_buffer, 1);
-        self.bit_buffer = ov[0];
-
-        self.bit_buffer_open_bits += 1;
-
-        const code_most_sig_bit = ov[1];
-        const most_sig_bit_shifted = @as(u16, code_most_sig_bit) << (self.cur_code_width - 1);
-        code |= most_sig_bit_shifted;
+        const code_most_sig_bit = self.bit_buffer.takeNBits(1);
+        const shifted_bit: u16 = @intCast(code_most_sig_bit << (self.cur_code_width - 1));
+        code |= shifted_bit;
     }
 
     return code;
