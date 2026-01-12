@@ -1,13 +1,11 @@
 const std = @import("std");
 
-const chm = @import("comptime_hash_map");
-
 const Ast = @import("Ast.zig");
 const CommandTag = @import("CommandTag.zig").Tag;
 const VarType = @import("VarType.zig").VarType;
 const IndexSlice = @import("../IndexSlice.zig");
 
-const known_vars = @import("known_vars.zig").vars;
+const known_vars = @import("known_vars.zig").known_vars;
 
 const ecl_base = 0x6af6;
 const scratch1_start = 0x97f6;
@@ -36,9 +34,15 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
     var jump_dests = std.AutoArrayHashMap(u16, void).init(allocator);
     defer jump_dests.deinit();
 
-    var script_stream = std.io.fixedBufferStream(script_bytes);
+    var script_reader = std.Io.Reader.fixed(script_bytes);
 
-    const header, const commands, const args = try readHeaderAndCommands(allocator, &script_stream, initial_highest_known_command_address);
+    const header, const commands, const args = readHeaderAndCommands(allocator, &script_reader, initial_highest_known_command_address) catch |err| switch(err) {
+        error.ReadFailed => unreachable,
+        error.EndOfStream => return error.EndOfStream,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidEnumTag => return error.InvalidEnumTag,
+        error.WrongArgEncoding => return error.WrongArgEncoding,
+    };
     defer allocator.free(commands);
     defer allocator.free(args);
 
@@ -46,8 +50,8 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
     // initialized bytes that must be tracked
     // if 1 byte remains, it's probably just padding to
     // keep the script alignment of 2
-    if (try script_stream.getEndPos() - script_stream.pos > 1) {
-        try data_block_refs.put(@intCast(ecl_base + script_stream.pos), {});
+    if (script_reader.bufferedLen() > 1) {
+        try data_block_refs.put(@intCast(ecl_base + script_reader.seek), {});
     }
 
     for (&header) |address| {
@@ -143,33 +147,33 @@ pub fn parseAlloc(allocator: std.mem.Allocator, script_bytes: []const u8, text_b
 fn readHeader(reader: anytype) ![5]u16 {
     var result: [5]u16 = undefined;
     for (&result) |*address| {
-        try reader.skipBytes(2, .{});
-        address.* = try reader.readInt(u16, .little);
+        reader.toss(2);
+        address.* = try reader.takeInt(u16, .little);
     }
     return result;
 }
 
-fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.FixedBufferStream([]const u8), initial_highest_known_command_address: ?u16) !struct { [5]u16, []Command, []Arg } {
-    var commands = std.ArrayList(Command).init(allocator);
+fn readHeaderAndCommands(allocator: std.mem.Allocator, script_reader: *std.Io.Reader, initial_highest_known_command_address: ?u16) !struct { [5]u16, []Command, []Arg } {
+    var commands = std.array_list.Managed(Command).init(allocator);
     defer commands.deinit();
-    var args = std.ArrayList(Arg).init(allocator);
+    var args = std.array_list.Managed(Arg).init(allocator);
     defer args.deinit();
 
-    const header = try readHeader(script_stream.reader());
+    const header = try readHeader(script_reader);
     var highest_known_command_address = std.mem.max(u16, &header);
     if (initial_highest_known_command_address) |address| {
         highest_known_command_address = @max(address, highest_known_command_address);
     }
 
     var last_command_was_conditional = false;
-    while (script_stream.pos + ecl_base <= highest_known_command_address) {
+    while (script_reader.seek + ecl_base <= highest_known_command_address) {
         const command = blk: {
             var c: Command = undefined;
 
-            c.address = @intCast(script_stream.pos + ecl_base);
-            c.tag = try script_stream.reader().readEnum(CommandTag, .little);
+            c.address = @intCast(script_reader.seek + ecl_base);
+            c.tag = try script_reader.takeEnum(CommandTag, .little);
             c.args.start = args.items.len;
-            try readCommandArgs(script_stream.reader(), c.tag, &args);
+            try readCommandArgs(script_reader, c.tag, &args);
             c.args.stop = args.items.len;
 
             break :blk c;
@@ -184,7 +188,7 @@ fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.Fi
         }
 
         if (command.tag.isFallthrough() or last_command_was_conditional) {
-            const next_command_address: u16 = @intCast(script_stream.pos + ecl_base);
+            const next_command_address: u16 = @intCast(script_reader.seek + ecl_base);
             highest_known_command_address = @max(next_command_address, highest_known_command_address);
         }
 
@@ -203,7 +207,7 @@ fn readHeaderAndCommands(allocator: std.mem.Allocator, script_stream: *std.io.Fi
     };
 }
 
-fn readCommandArgs(reader: anytype, command_tag: CommandTag, args: *std.ArrayList(Arg)) !void {
+fn readCommandArgs(reader: *std.Io.Reader, command_tag: CommandTag, args: *std.array_list.Managed(Arg)) !void {
     switch (command_tag) {
         .ONGOTO, .ONGOSUB => {
             const arg0 = try readArg(reader);
@@ -269,21 +273,17 @@ fn canonicalizeVarUse(arg: *Arg, script_len: usize) void {
     }
 }
 
-const known_var_map = blk: {
-    const KVTuple = struct { VarUse, []const u8 };
-
-    var kvs: [known_vars.len]KVTuple = undefined;
-    for (known_vars, 0..) |v, i| {
-        const name, const var_type, const address = v;
-        const var_use = VarUse{ .address = address, .var_type = var_type };
-        kvs[i] = .{ var_use, name };
+fn maybeGetKnownVarName(var_use: VarUse) ?[]const u8 {
+    for (known_vars) |v| {
+        if (v.address == var_use.address and v.var_type == var_use.var_type) {
+            return v.name;
+        }
     }
-
-    break :blk chm.AutoComptimeHashMap(VarUse, []const u8, kvs);
-};
+    return null;
+}
 
 fn generateVarName(allocator: std.mem.Allocator, var_use: VarUse) ![]const u8 {
-    if (known_var_map.get(var_use)) |name| return name.*;
+    if (maybeGetKnownVarName(var_use)) |name| return name;
 
     const prefix = switch (var_use.var_type) {
         .byte => "bvar",
@@ -313,7 +313,7 @@ fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []c
     std.debug.assert(std.sort.isSorted(u16, jump_dests, {}, std.sort.asc(u16)));
 
     var command_blocks = try std.ArrayList(Ast.CommandBlock).initCapacity(allocator, jump_dests.len);
-    errdefer command_blocks.deinit();
+    errdefer command_blocks.deinit(allocator);
 
     var commands_start: usize = 0;
     for (0..jump_dests.len) |i| {
@@ -342,14 +342,14 @@ fn getBlocksFromCommandsAndJumpDests(allocator: std.mem.Allocator, commands: []c
         commands_start = commands_end;
     }
 
-    return command_blocks.toOwnedSlice();
+    return command_blocks.toOwnedSlice(allocator);
 }
 
 fn getDataBlocksFromRefs(allocator: std.mem.Allocator, script: []const u8, ref_addresses: []const u16) ![]Ast.DataBlock {
     std.debug.assert(std.sort.isSorted(u16, ref_addresses, {}, std.sort.asc(u16)));
 
     var data_blocks = try std.ArrayList(Ast.DataBlock).initCapacity(allocator, ref_addresses.len);
-    errdefer data_blocks.deinit();
+    errdefer data_blocks.deinit(allocator);
 
     for (0..ref_addresses.len) |i| {
         const label = try std.fmt.allocPrint(
@@ -372,12 +372,12 @@ fn getDataBlocksFromRefs(allocator: std.mem.Allocator, script: []const u8, ref_a
         });
     }
 
-    return data_blocks.toOwnedSlice();
+    return data_blocks.toOwnedSlice(allocator);
 }
 
 fn getVarsFromVarMap(allocator: std.mem.Allocator, var_map: std.AutoArrayHashMap(VarUse, []const u8)) ![]Ast.Var {
     var vars = try std.ArrayList(Ast.Var).initCapacity(allocator, var_map.count());
-    errdefer vars.deinit();
+    errdefer vars.deinit(allocator);
 
     var it = var_map.iterator();
     while (it.next()) |entry| {
@@ -388,12 +388,12 @@ fn getVarsFromVarMap(allocator: std.mem.Allocator, var_map: std.AutoArrayHashMap
         });
     }
 
-    return vars.toOwnedSlice();
+    return vars.toOwnedSlice(allocator);
 }
 
 fn getAstCommandsFromCommands(allocator: std.mem.Allocator, commands: []const Command) ![]Ast.Command {
     var ast_commands = try std.ArrayList(Ast.Command).initCapacity(allocator, commands.len);
-    errdefer ast_commands.deinit();
+    errdefer ast_commands.deinit(allocator);
 
     for (commands) |command| {
         ast_commands.appendAssumeCapacity(.{
@@ -402,7 +402,7 @@ fn getAstCommandsFromCommands(allocator: std.mem.Allocator, commands: []const Co
         });
     }
 
-    return ast_commands.toOwnedSlice();
+    return ast_commands.toOwnedSlice(allocator);
 }
 
 fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: std.AutoArrayHashMap(VarUse, []const u8), jump_dests: std.AutoArrayHashMap(u16, void), data_block_refs: std.AutoArrayHashMap(u16, void), text_bytes: []const u8) ![]Ast.Arg {
@@ -410,7 +410,7 @@ fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: 
     std.debug.assert(std.sort.isSorted(u16, data_block_refs.keys(), {}, std.sort.asc(u16)));
 
     var ast_args = try std.ArrayList(Ast.Arg).initCapacity(allocator, args.len);
-    errdefer ast_args.deinit();
+    errdefer ast_args.deinit(allocator);
 
     for (args) |arg| {
         const ast_arg: Ast.Arg = switch (arg) {
@@ -429,7 +429,7 @@ fn getAstArgsFromArgs(allocator: std.mem.Allocator, args: []const Arg, var_map: 
         ast_args.appendAssumeCapacity(ast_arg);
     }
 
-    return ast_args.toOwnedSlice();
+    return ast_args.toOwnedSlice(allocator);
 }
 
 const CommandBlock = struct {
@@ -517,9 +517,9 @@ const Arg = union(enum) {
     }
 };
 
-fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Command {
+fn readCommand(reader: *std.Io.Reader, args: *std.ArrayList(Arg), address: u16) !Command {
     const args_start_index = args.items.len;
-    const tag = try reader.readEnum(CommandTag, .little);
+    const tag = try reader.takeEnum(CommandTag, .little);
 
     switch (tag) {
         .ONGOTO, .ONGOSUB, .HMENU, .WHMENU, .TREASURE, .NEWREGION => {
@@ -557,36 +557,36 @@ fn readCommand(reader: anytype, args: *std.ArrayList(Arg), address: u16) !Comman
     };
 }
 
-fn readArg(reader: anytype) !Arg {
-    const meta_byte = try reader.readByte();
+fn readArg(reader: *std.Io.Reader) !Arg {
+    const meta_byte = try reader.takeByte();
 
     const encoding = Arg.Encoding.fromMetaByte(meta_byte);
 
     return switch (encoding) {
-        .immediate1 => .{ .immediate = try reader.readByte() },
-        .immediate2 => .{ .immediate = try reader.readInt(u16, .little) },
-        .immediate4 => .{ .immediate = try reader.readInt(u32, .little) },
+        .immediate1 => .{ .immediate = try reader.takeByte() },
+        .immediate2 => .{ .immediate = try reader.takeInt(u16, .little) },
+        .immediate4 => .{ .immediate = try reader.takeInt(u32, .little) },
         .byte_var => .{ .var_use = .{
-            .address = try reader.readInt(u16, .little),
+            .address = try reader.takeInt(u16, .little),
             .var_type = .byte,
         } },
         .word_var => .{ .var_use = .{
-            .address = try reader.readInt(u16, .little),
+            .address = try reader.takeInt(u16, .little),
             .var_type = .word,
         } },
         .dword_var => .{ .var_use = .{
-            .address = try reader.readInt(u16, .little),
+            .address = try reader.takeInt(u16, .little),
             .var_type = .dword,
         } },
         .mem_address => .{ .var_use = .{
-            .address = try reader.readInt(u16, .little),
+            .address = try reader.takeInt(u16, .little),
             .var_type = .pointer,
         } },
-        .string => .{ .string = try reader.readInt(u16, .little) },
+        .string => .{ .string = try reader.takeInt(u16, .little) },
     };
 }
 
-fn readJumpDestArg(reader: anytype) !Arg {
+fn readJumpDestArg(reader: *std.Io.Reader) !Arg {
     const arg = try readArg(reader);
     if (arg != .var_use and arg.var_use.var_type != .byte) {
         return error.WrongArgEncoding;

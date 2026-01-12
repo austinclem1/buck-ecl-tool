@@ -65,7 +65,7 @@ pub fn getCommandArgs(self: *const Ast, command: Command) []const Arg {
     return self.args[command.args.start..command.args.stop];
 }
 
-pub fn serializeText(self: *const @This(), writer: anytype) !void {
+pub fn serializeText(self: *const @This(), writer: *std.Io.Writer) !void {
     try writer.print("header:\n", .{});
     for (self.header) |block_index| {
         try writer.print("\t{s}\n", .{self.command_blocks[block_index].label});
@@ -121,6 +121,8 @@ pub fn serializeText(self: *const @This(), writer: anytype) !void {
         }
         try writer.print("\n", .{});
     }
+
+    try writer.flush();
 }
 
 const AddressStub = struct {
@@ -138,67 +140,64 @@ pub const EclBinary = struct {
     text: []u8,
 };
 
-pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator) !EclBinary {
-    var binary = std.ArrayList(u8).init(allocator);
-    defer binary.deinit();
+pub fn serializeBinary(self: *const @This(), gpa: std.mem.Allocator) !EclBinary {
+    var output = std.Io.Writer.Allocating.init(gpa);
+    defer output.deinit();
 
-    const w = binary.writer();
+    var string_bytes: std.ArrayList(u8) = .empty;
+    defer string_bytes.deinit(gpa);
 
-    var string_bytes = std.ArrayList(u8).init(allocator);
-    defer string_bytes.deinit();
-
-    var address_stubs = std.ArrayList(AddressStub).init(allocator);
-    defer address_stubs.deinit();
+    var address_stubs: std.ArrayList(AddressStub) = .empty;
+    defer address_stubs.deinit(gpa);
 
     for (&self.header) |block_index| {
-        try w.writeInt(u16, 0x0101, .little);
-        try address_stubs.append(.{
-            .location = binary.items.len,
+        try output.writer.writeInt(u16, 0x0101, .little);
+        try address_stubs.append(gpa, .{
+            .location = output.writer.end,
             .dest = .{ .command_block = block_index },
         });
-        try w.writeInt(u16, stub_address, .little);
+        try output.writer.writeInt(u16, stub_address, .little);
     }
 
-    var command_block_addresses = try std.ArrayList(u16).initCapacity(allocator, self.command_blocks.len);
-    defer command_block_addresses.deinit();
-    var data_block_addresses = try std.ArrayList(u16).initCapacity(allocator, self.data_blocks.len);
-    defer data_block_addresses.deinit();
+    var command_block_addresses = try std.ArrayList(u16).initCapacity(gpa, self.command_blocks.len);
+    defer command_block_addresses.deinit(gpa);
+    var data_block_addresses = try std.ArrayList(u16).initCapacity(gpa, self.data_blocks.len);
+    defer data_block_addresses.deinit(gpa);
 
     for (self.command_blocks) |block| {
-        command_block_addresses.appendAssumeCapacity(@intCast(binary.items.len + ecl_base));
+        command_block_addresses.appendAssumeCapacity(@intCast(output.writer.end + ecl_base));
         for (self.getBlockCommands(block)) |command| {
-            try w.writeByte(@intFromEnum(command.tag));
+            try output.writer.writeByte(@intFromEnum(command.tag));
             for (self.getCommandArgs(command)) |arg| {
-                try writeArgBinary(arg, &binary, self.vars, &address_stubs, &string_bytes);
+                try writeArgBinary(gpa, arg, &output.writer, self.vars, &address_stubs, &string_bytes);
             }
         }
     }
 
     for (self.data_blocks) |block| {
-        data_block_addresses.appendAssumeCapacity(@intCast(binary.items.len + ecl_base));
-        try w.writeAll(block.bytes);
+        data_block_addresses.appendAssumeCapacity(@intCast(output.writer.end + ecl_base));
+        try output.writer.writeAll(block.bytes);
     }
 
     std.debug.assert(command_block_addresses.items.len == self.command_blocks.len);
     std.debug.assert(data_block_addresses.items.len == self.data_blocks.len);
-    var binary_fbs = std.io.fixedBufferStream(binary.items);
+    var out_script = try output.toOwnedSlice();
+    errdefer gpa.free(out_script);
     for (address_stubs.items) |stub_info| {
         const address = switch (stub_info.dest) {
             .command_block => |index| command_block_addresses.items[index],
             .data_block => |index| data_block_addresses.items[index],
         };
-        try binary_fbs.seekTo(stub_info.location);
-        try binary_fbs.writer().writeInt(u16, address, .little);
+        var fixed_writer = std.Io.Writer.fixed(out_script[stub_info.location..]);
+        try fixed_writer.writeInt(u16, address, .little);
     }
 
-    if (binary.items.len % 2 == 1) {
-        try w.writeByte(0);
+    if (output.writer.end % 2 == 1) {
+        try output.writer.writeByte(0);
     }
 
-    const out_script = try binary.toOwnedSlice();
-    errdefer allocator.free(out_script);
-    const out_text = try string_bytes.toOwnedSlice();
-    errdefer allocator.free(out_text);
+    const out_text = try string_bytes.toOwnedSlice(gpa);
+    errdefer gpa.free(out_text);
 
     return EclBinary{
         .script = out_script,
@@ -206,20 +205,18 @@ pub fn serializeBinary(self: *const @This(), allocator: std.mem.Allocator) !EclB
     };
 }
 
-fn writeArgBinary(arg: Arg, out_binary: *std.ArrayList(u8), vars: []const Var, address_stubs: *std.ArrayList(AddressStub), string_bytes: *std.ArrayList(u8)) !void {
-    const w = out_binary.writer();
-
+fn writeArgBinary(gpa: std.mem.Allocator, arg: Arg, out_writer: *std.Io.Writer, vars: []const Var, address_stubs: *std.ArrayList(AddressStub), string_bytes: *std.ArrayList(u8)) !void {
     switch (arg) {
         .immediate => |val| {
             if (std.math.cast(u8, val)) |cast_val| {
-                try w.writeByte(0);
-                try w.writeByte(cast_val);
+                try out_writer.writeByte(0);
+                try out_writer.writeByte(cast_val);
             } else if (std.math.cast(u16, val)) |cast_val| {
-                try w.writeByte(2);
-                try w.writeInt(u16, cast_val, .little);
+                try out_writer.writeByte(2);
+                try out_writer.writeInt(u16, cast_val, .little);
             } else {
-                try w.writeByte(4);
-                try w.writeInt(u32, val, .little);
+                try out_writer.writeByte(4);
+                try out_writer.writeInt(u32, val, .little);
             }
         },
         .var_use => |var_index| {
@@ -230,8 +227,8 @@ fn writeArgBinary(arg: Arg, out_binary: *std.ArrayList(u8), vars: []const Var, a
                 .dword => 5,
                 .pointer => 0x81,
             };
-            try w.writeByte(meta_byte);
-            try w.writeInt(u16, var_info.address, .little);
+            try out_writer.writeByte(meta_byte);
+            try out_writer.writeInt(u16, var_info.address, .little);
         },
         .ptr_deref => |deref_info| {
             const var_info = vars[deref_info.ptr_var_id];
@@ -242,31 +239,31 @@ fn writeArgBinary(arg: Arg, out_binary: *std.ArrayList(u8), vars: []const Var, a
                 .dword => 5,
                 .pointer => std.debug.panic("Encountered pointer dereference to pointer type\n", .{}),
             };
-            try w.writeByte(meta_byte);
-            try w.writeInt(u16, @intCast(var_info.address + deref_info.offset), .little);
+            try out_writer.writeByte(meta_byte);
+            try out_writer.writeInt(u16, @intCast(var_info.address + deref_info.offset), .little);
         },
         .string => |s| {
             const string_offset: u16 = @intCast(string_bytes.items.len);
-            try string_bytes.appendSlice(s);
-            try string_bytes.append(0x00); // null terminator
-            try w.writeByte(0x80);
-            try w.writeInt(u16, string_offset, .little);
+            try string_bytes.appendSlice(gpa, s);
+            try string_bytes.append(gpa, 0x00); // null terminator
+            try out_writer.writeByte(0x80);
+            try out_writer.writeInt(u16, string_offset, .little);
         },
         .command_block => |block_index| {
-            try w.writeByte(1);
-            try address_stubs.append(.{
-                .location = out_binary.items.len,
+            try out_writer.writeByte(1);
+            try address_stubs.append(gpa, .{
+                .location = out_writer.end,
                 .dest = .{ .command_block = block_index },
             });
-            try w.writeInt(u16, stub_address, .little);
+            try out_writer.writeInt(u16, stub_address, .little);
         },
         .data_block => |block_index| {
-            try w.writeByte(1);
-            try address_stubs.append(.{
-                .location = out_binary.items.len,
+            try out_writer.writeByte(1);
+            try address_stubs.append(gpa, .{
+                .location = out_writer.end,
                 .dest = .{ .data_block = block_index },
             });
-            try w.writeInt(u16, stub_address, .little);
+            try out_writer.writeInt(u16, stub_address, .little);
         },
     }
 }

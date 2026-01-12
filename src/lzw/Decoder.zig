@@ -82,23 +82,29 @@ pub fn reset(self: *Decoder) void {
     };
 }
 
-pub fn decompress(self: *Decoder, reader_: anytype, writer: anytype, optional_max_size: ?usize) !void {
-    var counting_reader = std.io.countingReader(reader_);
-    const reader = counting_reader.reader();
-    var counting_writer = std.io.countingWriter(writer);
+const DecompressError = error{
+    InvalidCode,
+    WriteFailed,
+    ReadFailed,
+    EndOfStream,
+};
+
+pub fn decompress(self: *Decoder, reader: *std.Io.Reader, writer: *std.Io.Writer, optional_max_size: ?usize) DecompressError!void {
+    var bytes_written: usize = 0;
 
     main_loop: while (true) {
         if (optional_max_size) |max_size| {
-            const space_remaining = max_size - counting_writer.bytes_written;
+            const space_remaining = max_size - bytes_written;
             const bytes_to_write = @min(self.decoding_buffer.items.len, space_remaining);
             for (0..bytes_to_write) |_| {
                 const ch = self.decoding_buffer.pop().?;
-                try counting_writer.writer().writeByte(ch);
+                try writer.writeByte(ch);
+                bytes_written += 1;
             }
-            if (counting_writer.bytes_written >= max_size) break :main_loop;
+            if (bytes_written >= max_size) break :main_loop;
         } else {
             while (self.decoding_buffer.pop()) |ch| {
-                try counting_writer.writer().writeByte(ch);
+                try writer.writeByte(ch);
             }
         }
 
@@ -143,9 +149,11 @@ pub fn decompress(self: *Decoder, reader_: anytype, writer: anytype, optional_ma
 
         self.previous_code = code;
     }
+
+    try writer.flush();
 }
 
-fn expandCode(self: *Decoder, code: u16) (Allocator.Error || error{ ReachedPrefixLengthLimit, InvalidCode })!void {
+fn expandCode(self: *Decoder, code: u16) error{ InvalidCode }!void {
     std.debug.assert(code != clear_code);
     std.debug.assert(code != end_code);
 
@@ -170,7 +178,7 @@ fn expandCode(self: *Decoder, code: u16) (Allocator.Error || error{ ReachedPrefi
     }
 }
 
-fn readCode(self: *Decoder, reader: anytype) !u16 {
+fn readCode(self: *Decoder, reader: *std.Io.Reader) !u16 {
     try self.bit_buffer.fill(reader);
 
     const short_code_width = self.cur_code_width - 1;

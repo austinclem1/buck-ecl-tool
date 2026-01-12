@@ -54,7 +54,7 @@ pub fn deinit(self: *Encoder, allocator: Allocator) void {
 }
 
 pub fn compress(self: *Encoder, writer: anytype, reader: anytype) !void {
-    var counting_writer = std.io.countingWriter(writer);
+    var bytes_written: usize = 0;
 
     while (reader.readByte()) |ch| {
         if (self.on_first_byte) {
@@ -66,7 +66,8 @@ pub fn compress(self: *Encoder, writer: anytype, reader: anytype) !void {
         if (self.indexOfMatchingEntry(self.cur_prefix, ch)) |match| {
             self.cur_prefix = match;
         } else {
-            try self.writeCode(self.cur_prefix, counting_writer.writer());
+            try self.writeCode(self.cur_prefix);
+            bytes_written += try self.bit_buffer.flushFinishedBytes(writer);
             try self.maybeUpdateDictAndCodeWidth(ch);
             self.cur_prefix = ch;
         }
@@ -75,27 +76,25 @@ pub fn compress(self: *Encoder, writer: anytype, reader: anytype) !void {
         else => return err,
     }
 
-    try self.writeCode(self.cur_prefix, counting_writer.writer());
-    try self.writeCode(end_code, counting_writer.writer());
+    try self.writeCode(self.cur_prefix);
+    bytes_written += try self.bit_buffer.flushFinishedBytes(writer);
+    try self.writeCode(end_code);
+    bytes_written += try self.bit_buffer.flushFinishedBytes(writer);
 
-    try self.bit_buffer.flush(counting_writer.writer());
-    if (counting_writer.bytes_written % 2 == 1) try counting_writer.writer().writeByte(0);
-    try counting_writer.writer().writeByte(0);
-    try counting_writer.writer().writeByte(0);
-    try counting_writer.writer().writeByte(0);
-    try counting_writer.writer().writeByte(0);
+    bytes_written += try self.bit_buffer.flushAll(writer);
+    if (bytes_written % 2 == 1) try writer.writeByte(0);
 }
 
-fn writeCode(self: *Encoder, code: u16, writer: anytype) !void {
+fn writeCode(self: *Encoder, code: u16) !void {
     const lower_bits_mask = (@as(u16, 1) << @intCast(self.code_width - 1)) - 1;
 
     const dict_len_masked = (self.dict.len - 1) & lower_bits_mask;
     const code_masked = code & lower_bits_mask;
 
-    try self.bit_buffer.writeNBits(code_masked, self.code_width - 1, writer);
+    self.bit_buffer.writeNBits(code_masked, self.code_width - 1) catch std.debug.panic("BitBuffer overfilled\n", .{});
     if (code_masked <= dict_len_masked) {
         const most_sig_bit = code >> (self.code_width - 1);
-        try self.bit_buffer.writeNBits(most_sig_bit, 1, writer);
+        self.bit_buffer.writeNBits(most_sig_bit, 1) catch std.debug.panic("BitBuffer overfilled\n", .{});
     }
 }
 

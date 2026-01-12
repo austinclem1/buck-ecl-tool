@@ -90,7 +90,7 @@ pub const TokenStream = struct {
 };
 
 pub fn tokenize(allocator: Allocator, buffer: []const u8) error{ TokenizationFailed, OutOfMemory }!TokenStream {
-    var tokens = std.ArrayList(Token).init(allocator);
+    var tokens = std.array_list.Managed(Token).init(allocator);
     defer tokens.deinit();
 
     var pos: usize = 0;

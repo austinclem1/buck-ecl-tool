@@ -1,109 +1,87 @@
 const std = @import("std");
 
-const Allocator = std.mem.Allocator;
-const File = std.fs.File;
+const fatal = std.process.fatal;
+const panic = std.debug.panic;
 
 const ecl = @import("ecl.zig");
 const lzw = @import("lzw.zig");
 
 const ecl_base: u16 = 0x6af6;
 
-const tokenize = @import("ecl/tokenize.zig");
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    // var f = try std.fs.cwd().openFile("lastfuzzinput", .{});
-    // defer f.close();
-    // const input = try f.readToEndAlloc(allocator, 0x100000);
-    // defer allocator.free(input);
-    // // try testEncodeDecode(allocator, &@as([1000]u8, @splat(0)));
-    // try testEncodeDecode(allocator, input);
+    const gpa = debug_allocator.allocator();
+    defer _ = debug_allocator.deinit();
 
-    const args = std.process.argsAlloc(allocator) catch {
-        std.debug.print("Failed to allocate process args\n", .{});
-        return;
+    const args = std.process.argsAlloc(gpa) catch {
+        @panic("Failed to allocate process args\n");
     };
-    defer std.process.argsFree(allocator, args);
+    defer std.process.argsFree(gpa, args);
 
     if (args.len < 2) {
-        printHelp();
-        return;
+        fatal(help_text, .{});
     }
 
     const subcommand = args[1];
-    if (std.mem.eql(u8, subcommand, "extract-all")) {
-        const subcommandArgs = parseExtractAllCommandArgs(args[2..]) catch {
-            printHelp();
-            return;
+    if (std.mem.eql(u8, subcommand, "help") or std.mem.eql(u8, subcommand, "--help") or std.mem.eql(u8, subcommand, "-h")) {
+        std.debug.print(help_text, .{});
+        std.process.exit(0);
+    } else if (std.mem.eql(u8, subcommand, "extract-all")) {
+        const extract_all_args = parseExtractAllCommandArgs(args[2..]) catch {
+            fatal(help_text, .{});
         };
-        extractAllCommand(allocator, subcommandArgs);
+        extractAllCommand(gpa, extract_all_args) catch |err| switch(err) {
+            error.FailedToCreateOrOpenOutputDir => fatal("Failed to create/open output directory \"{s}\"\n", .{extract_all_args.output_dir_path}),
+            error.FailedToOpenRom => fatal("Failed to open input rom \"{s}\"\n", .{extract_all_args.input_rom_path}),
+            error.FailedToReadRom => fatal("Failed to read input rom \"{s}\"\n", .{extract_all_args.input_rom_path}),
+            error.InvalidDataWhileDecoding => fatal("Failed to decompress level data\n", .{}),
+            error.FailedToDisassembleEcl => fatal("Failed to disassemble level data\n", .{}),
+            error.FailedToWriteEcl => fatal("Failed to write output file\n", .{}),
+            error.OutOfMemory => @panic("Out of memory\n"),
+        };
     } else if (std.mem.eql(u8, subcommand, "patch-rom")) {
-        const subcommandArgs = parsePatchRomCommandArgs(args[2..]) catch {
-            printHelp();
-            return;
+        const patch_rom_args = parsePatchRomCommandArgs(args[2..]) catch {
+            fatal(help_text, .{});
         };
-        patchRomCommand(allocator, subcommandArgs);
+        patchRomCommand(gpa, patch_rom_args) catch |err| switch(err) {
+            error.OutOfMemory => @panic("Out of memory\n"),
+            error.FailedToOpenRom => fatal("Failed to open rom file \"{s}\"\n", .{patch_rom_args.input_rom_path}),
+            error.FailedToReadRom => fatal("Failed to read rom file \"{s}\"\n", .{patch_rom_args.input_rom_path}),
+            error.FailedToOpenEcl => fatal("Failed to open ecl file \"{s}\"\n", .{patch_rom_args.input_ecl_path}),
+            error.EclFileTooBig => fatal("Ecl file \"{s}\" too big\n", .{patch_rom_args.input_ecl_path}),
+            error.FailedToReadEcl => fatal("Failed to read ecl file \"{s}\"\n", .{patch_rom_args.input_ecl_path}),
+            error.FailedToParseEcl => fatal("Failed to parse ecl file \"{s}\"\n", .{patch_rom_args.input_ecl_path}),
+            error.TextDataTooBig => fatal("Patch text section too large\n", .{}),
+            error.FailedToCreateRom => fatal("Patch script section too large\n", .{}),
+        };
     } else if (std.mem.eql(u8, subcommand, "fix-mariposa")) {
-        const subcommandArgs = parseFixMariposaCommandArgs(args[2..]) catch {
-            printHelp();
-            return;
+        const fix_mariposa_args = parseFixMariposaCommandArgs(args[2..]) catch {
+            fatal(help_text, .{});
         };
-        fixMariposaCommand(subcommandArgs);
+        fixMariposaCommand(fix_mariposa_args) catch |err| switch(err) {
+            error.FailedToOpenRom => {
+                fatal("Failed to open rom file \"{s}\"\n", .{fix_mariposa_args.rom_path});
+            },
+            error.FailedToWriteToRom => {
+                fatal("Failed to to write mariposa patch to rom file \"{s}\"\n", .{fix_mariposa_args.rom_path});
+            },
+        };
     } else {
-        printHelp();
-        return;
+        fatal(help_text, .{});
     }
 }
 
-fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ecl.Ast {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const file_bytes = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(file_bytes);
-
-    var parser = ecl.TextParser.init(allocator);
-    defer parser.deinit();
-
-    return parser.parse(file_bytes);
-}
-
-fn calculateSegaHeaderChecksum(seekable_stream: anytype) !u16 {
-    const rom_len = try seekable_stream.getEndPos();
-    if (rom_len % 2 != 0) return error.RomOddLegth;
-
-    try seekable_stream.seekTo(0x200);
+fn calculateSegaHeaderChecksum(rom_bytes: []const u8) !u16 {
+    if (rom_bytes.len % 2 != 0) return error.RomOddLegth;
 
     var checksum: u16 = 0;
-
-    while (seekable_stream.context.reader().readInt(u16, .big)) |val| {
-        checksum +%= val;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
+    var i: usize = 0x200;
+    while (i < rom_bytes.len) : (i += 2) {
+        checksum +%= std.mem.readInt(u16, rom_bytes[i..][0..2], .big);
     }
 
     return checksum;
-}
-
-fn printHelp() void {
-    std.debug.print(
-        \\Usage: buck-ecl-tool [command] [options]
-        \\
-        \\Commands:
-        \\
-        \\  extract-all --rom [input rom path] --out [output directory]
-        \\    Extract all levels in rom as text ECL format to output directory
-        \\
-        \\  patch-rom --rom [input rom path] --ecl [updated ecl path] --dest-level-id [rom level id to overwrite] --out [output rom path]
-        \\    Patch specified level id in rom with the given text ECL file, writing the updated rom file to [out]
-        \\
-        \\  fix-mariposa --rom [input rom path]
-        \\    Apply fix to original compressed mariposa text data in rom that causes lzw decoder to erroneously keep running on
-        \\    level id 97 (0x61)
-        \\
-    , .{});
 }
 
 const ExtractAllCommandArgs = struct {
@@ -158,14 +136,14 @@ fn parseExtractAllCommandArgs(args: []const []const u8) !ExtractAllCommandArgs {
 const PatchRomCommandArgs = struct {
     input_rom_path: []const u8,
     input_ecl_path: []const u8,
-    dest_level_id: u16,
+    dest_level_id: u8,
     output_rom_path: []const u8,
 };
 
 fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
     var input_rom_path: ?[]const u8 = null;
     var input_ecl_path: ?[]const u8 = null;
-    var dest_level_id: ?u16 = null;
+    var dest_level_id: ?u8 = null;
     var output_rom_path: ?[]const u8 = null;
     const ParseState = enum {
         init,
@@ -200,7 +178,7 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
                 parse_state = .init;
             },
             .dest_level => {
-                dest_level_id = std.fmt.parseUnsigned(u16, arg, 0) catch {
+                dest_level_id = std.fmt.parseUnsigned(u8, arg, 0) catch {
                     std.debug.print("Error: Failed to parse --dest-level-id option \"{s}\"\n", .{arg});
                     return error.ParseArgsFailed;
                 };
@@ -213,7 +191,7 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
         }
     }
 
-    return PatchRomCommandArgs{
+    const result = PatchRomCommandArgs{
         .input_rom_path = input_rom_path orelse {
             std.debug.print("Error: No input rom path given\n", .{});
             return error.ParseArgsFailed;
@@ -231,189 +209,211 @@ fn parsePatchRomCommandArgs(args: []const []const u8) !PatchRomCommandArgs {
             return error.ParseArgsFailed;
         },
     };
+
+    return result;
 }
 
-fn extractAllCommand(allocator: Allocator, args: ExtractAllCommandArgs) void {
-    var rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch fatal("failed to open input rom \"{s}\"\n", .{args.input_rom_path});
-    defer rom.close();
-    const rom_stream = rom.seekableStream();
-    for (ecl.level_ids) |id| {
-        const compressed_script = ecl.readCompressedScriptAlloc(allocator, rom_stream, id) catch |err| {
-            fatal("failed to read compressed script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
-        };
-        defer allocator.free(compressed_script);
-        const compressed_text = ecl.readCompressedTextAlloc(allocator, rom_stream, id) catch |err| {
-            fatal("failed to read compressed text section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
-        };
-        defer allocator.free(compressed_text);
+const ExtractAllCommandError = error{
+    FailedToCreateOrOpenOutputDir,
+    FailedToOpenRom,
+    FailedToReadRom,
+    InvalidDataWhileDecoding,
+    FailedToDisassembleEcl,
+    FailedToWriteEcl,
+    OutOfMemory,
+};
 
-        var decoder = lzw.Decoder.init(allocator) catch |err| {
-            fatal("failed to initialize lzw decoder, error: {s}\n", .{@errorName(err)});
-        };
-        defer decoder.deinit(allocator);
+fn extractAllCommand(gpa: std.mem.Allocator, args: ExtractAllCommandArgs) ExtractAllCommandError!void {
+    var rom_file = std.fs.cwd().openFile(args.input_rom_path, .{}) catch return error.FailedToOpenRom;
+    defer rom_file.close();
+    
+    var out_dir = std.fs.cwd().makeOpenPath(args.output_dir_path, .{}) catch return error.FailedToCreateOrOpenOutputDir;
+    defer out_dir.close();
+
+    const address_table = try readRomEclAddressTable(&rom_file);
+    
+    var read_buf: [1024]u8 = undefined;
+    var rom_reader = rom_file.reader(&read_buf);
+    var decoder = try lzw.Decoder.init(gpa);
+    defer decoder.deinit(gpa);
+    for (level_ids) |id| {
+        decoder.reset();
         const bin_script = blk: {
-            var fbs = std.io.fixedBufferStream(compressed_script);
-            var output = std.ArrayList(u8).init(allocator);
-            errdefer output.deinit();
-            decoder.decompress(fbs.reader(), output.writer(), null) catch |err| {
-                fatal("failed to decompress script section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
+            const script_start_addr, _ = address_table.getScriptAddressAndLenById(id) catch panic("encountered invalid level id {d}\n", .{id});
+            rom_reader.seekTo(script_start_addr) catch return error.FailedToReadRom;
+            
+            var allocating_writer = std.io.Writer.Allocating.init(gpa);
+            defer allocating_writer.deinit();
+            
+            decoder.decompress(&rom_reader.interface, &allocating_writer.writer, null) catch |err| switch(err) {
+                error.WriteFailed => return error.OutOfMemory,
+                error.ReadFailed => return error.FailedToReadRom,
+                error.EndOfStream => return error.InvalidDataWhileDecoding,
+                error.InvalidCode => return error.InvalidDataWhileDecoding,
             };
-            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
+            break :blk try allocating_writer.toOwnedSlice();
         };
-        defer allocator.free(bin_script);
+        defer gpa.free(bin_script);
+        
         decoder.reset();
         const bin_text = blk: {
-            var fbs = std.io.fixedBufferStream(compressed_text);
-            var output = std.ArrayList(u8).init(allocator);
-            errdefer output.deinit();
-            decoder.decompress(fbs.reader(), output.writer(), null) catch |err| {
-                fatal("failed to decompress text section for level id {d}, error: {s}\n", .{ id, @errorName(err) });
+            const text_start_addr, _ = address_table.getTextAddressAndLenById(id) catch panic("encountered invalid level id {d}\n", .{id});
+            rom_reader.seekTo(text_start_addr) catch return error.FailedToReadRom;
+            
+            var allocating_writer = std.io.Writer.Allocating.init(gpa);
+            defer allocating_writer.deinit();
+            
+            decoder.decompress(&rom_reader.interface, &allocating_writer.writer, null) catch |err| switch(err) {
+                error.WriteFailed => return error.OutOfMemory,
+                error.ReadFailed => return error.FailedToReadRom,
+                error.EndOfStream => return error.InvalidDataWhileDecoding,
+                error.InvalidCode => return error.InvalidDataWhileDecoding,
             };
-            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
+            break :blk try allocating_writer.toOwnedSlice();
         };
-        defer allocator.free(bin_text);
-        const init_highest = if (id == 0x60) 0x907 + ecl_base else null;
-        var ast = ecl.binary_parser.parseAlloc(allocator, bin_script, bin_text, init_highest) catch |err| {
-            fatal("failed disassembly for level id {d}, error: {s}\n", .{ id, @errorName(err) });
+        defer gpa.free(bin_text);
+        
+        const initial_highest = if (id == 0x60) 0x907 + ecl_base else null;
+        var ast = ecl.binary_parser.parseAlloc(gpa, bin_script, bin_text, initial_highest) catch |err| switch(err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.FailedToDisassembleEcl,
         };
         defer ast.deinit();
 
-        var out_dir = std.fs.cwd().makeOpenPath(args.output_dir_path, .{}) catch |err| {
-            fatal("failed to create and open path {s}, error: {s}\n", .{ args.output_dir_path, @errorName(err) });
-        };
-        defer out_dir.close();
-
-        var buf: [32]u8 = undefined;
-        const filename = std.fmt.bufPrint(&buf, "{d:0>2}.ecl", .{id}) catch |err| {
-            fatal("output path too long, error: {s}\n", .{@errorName(err)});
-        };
-        var out_file = out_dir.createFile(filename, .{}) catch |err| {
-            fatal("failed to create file {s} in path {s}, error: {s}\n", .{ filename, args.output_dir_path, @errorName(err) });
-        };
+        var buf: [6]u8 = undefined;
+        const filename = std.fmt.bufPrint(&buf, "{d:0>2}.ecl", .{id}) catch unreachable;
+        var out_file = out_dir.createFile(filename, .{}) catch return error.FailedToWriteEcl;
         defer out_file.close();
-        ast.serializeText(out_file.writer()) catch |err| {
-            fatal("failed to serialize ecl for level id {d} to file {s}, error: {s}\n", .{ id, filename, @errorName(err) });
+        
+        var write_buf: [1024]u8 = undefined;
+        var out_writer = out_file.writer(&write_buf);
+        ast.serializeText(&out_writer.interface) catch |err| switch(err) {
+            error.WriteFailed => return error.FailedToWriteEcl,
         };
     }
 }
 
-fn patchRomCommand(allocator: Allocator, args: PatchRomCommandArgs) void {
-    var in_rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch fatal("failed to open input rom \"{s}\"\n", .{args.input_rom_path});
+fn patchRomCommand(gpa: std.mem.Allocator, args: PatchRomCommandArgs) !void {
+    var in_rom = std.fs.cwd().openFile(args.input_rom_path, .{}) catch return error.FailedToOpenRom;
     defer in_rom.close();
+    const address_table = try readRomEclAddressTable(&in_rom);
 
-    var out_rom_bytes = in_rom.readToEndAlloc(allocator, 1024 * 1024 * 16) catch |err| {
-        fatal("failed to read file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+    var out_rom_bytes = blk: {
+        var in_rom_reader = in_rom.reader(&.{});
+        const in_rom_size = in_rom_reader.getSize() catch return error.FailedToReadRom;
+        const rom_bytes = in_rom_reader.interface.readAlloc(gpa, in_rom_size) catch |err| switch(err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ReadFailed => return error.FailedToReadRom,
+            error.EndOfStream => unreachable,
+        };
+        break :blk rom_bytes;
     };
-    defer allocator.free(out_rom_bytes);
+    defer gpa.free(out_rom_bytes);
 
-    var in_ecl = std.fs.cwd().openFile(args.input_ecl_path, .{}) catch fatal("failed to open input ecl text file \"{s}\"\n", .{args.input_ecl_path});
+    var in_ecl = std.fs.cwd().openFile(args.input_ecl_path, .{}) catch return error.FailedToOpenEcl;
     defer in_ecl.close();
 
-    const in_ecl_bytes = in_ecl.readToEndAlloc(allocator, 1024 * 1024 * 32) catch |err| {
-        fatal("failed to read file {s}, error: {s}\n", .{ args.input_ecl_path, @errorName(err) });
+    const in_ecl_bytes = in_ecl.readToEndAlloc(gpa, 1024 * 1024 * 1024) catch |err| switch(err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileTooBig => return error.EclFileTooBig,
+        else => return error.FailedToReadEcl,
     };
-    defer allocator.free(in_ecl_bytes);
+    defer gpa.free(in_ecl_bytes);
 
     var parsed_ecl = blk: {
-        var parser = ecl.TextParser.init(allocator);
+        var parser = ecl.TextParser.init(gpa);
         defer parser.deinit();
 
-        break :blk parser.parse(in_ecl_bytes) catch |err| {
-            fatal("failed to parse file {s}, error: {s}\n", .{ args.input_ecl_path, @errorName(err) });
+        break :blk parser.parse(in_ecl_bytes) catch |err| switch(err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TokenizationFailed, error.ParsingFailed => return error.FailedToParseEcl,
         };
     };
     defer parsed_ecl.deinit();
 
-    const ecl_binary = parsed_ecl.serializeBinary(allocator) catch |err| {
-        fatal("failed to serialize parsed ecl to binary, error: {s}\n", .{@errorName(err)});
+    const ecl_binary = parsed_ecl.serializeBinary(gpa) catch |err| switch(err) {
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
     };
-    defer allocator.free(ecl_binary.script);
-    defer allocator.free(ecl_binary.text);
+    defer gpa.free(ecl_binary.script);
+    defer gpa.free(ecl_binary.text);
 
     {
         const compressed_script = blk: {
-            var encoder = lzw.Encoder.init(allocator) catch |err| {
-                fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
-            };
-            defer encoder.deinit(allocator);
+            var encoder = try lzw.Encoder.init(gpa);
+            defer encoder.deinit(gpa);
             var fbs = std.io.fixedBufferStream(ecl_binary.script);
-            var output = std.ArrayList(u8).init(allocator);
+            var output = std.array_list.Managed(u8).init(gpa);
             defer output.deinit();
-            encoder.compress(output.writer(), fbs.reader()) catch |err| {
-                fatal("failed to compress ecl binary script data, error: {s}\n", .{@errorName(err)});
+            encoder.compress(output.writer(), fbs.reader()) catch |err| switch(err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.EndOfStream => unreachable,
             };
-            break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
+            break :blk try output.toOwnedSlice();
         };
-        defer allocator.free(compressed_script);
+        defer gpa.free(compressed_script);
 
-        const dest_start, const dest_end = ecl.getScriptAddrs(in_rom.seekableStream(), 0x10) catch |err| {
-            fatal("failed to read script dest address from rom file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+        const dest_start, const dest_len = address_table.getScriptAddressAndLenById(args.dest_level_id) catch {
+            panic("invalid destination level id {d}\n", .{ args.dest_level_id });
         };
-        const max_script_size = dest_end - dest_start;
-
-        if (compressed_script.len > max_script_size) {
-            fatal("resulting script data larger than original data: {d} bytes (original {d})\n", .{ compressed_script.len, max_script_size });
+        if (compressed_script.len > dest_len) {
+            fatal("resulting script data larger than original data: {d} bytes (original {d})\n", .{ compressed_script.len, dest_len });
+            return error.ScriptDataTooBig;
         }
 
-        std.mem.copyForwards(u8, out_rom_bytes[dest_start..dest_end], compressed_script);
+        std.mem.copyForwards(u8, out_rom_bytes[dest_start..][0..dest_len], compressed_script);
     }
 
     {
         const compressed_text = blk: {
-            var encoder = lzw.Encoder.init(allocator) catch |err| {
-                fatal("failed to initialize lzw encoder, error: {s}\n", .{@errorName(err)});
-            };
-            defer encoder.deinit(allocator);
+            var encoder = try lzw.Encoder.init(gpa);
+            defer encoder.deinit(gpa);
             var fbs = std.io.fixedBufferStream(ecl_binary.text);
-            var output = std.ArrayList(u8).init(allocator);
+            var output = std.array_list.Managed(u8).init(gpa);
             defer output.deinit();
-            encoder.compress(output.writer(), fbs.reader()) catch |err| {
-                fatal("failed to compress ecl binary text data, error: {s}\n", .{@errorName(err)});
+            encoder.compress(output.writer(), fbs.reader()) catch |err| switch(err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.EndOfStream => unreachable,
             };
             break :blk output.toOwnedSlice() catch fatal("out of memory\n", .{});
         };
-        defer allocator.free(compressed_text);
+        defer gpa.free(compressed_text);
 
-        const dest_start, const dest_end = ecl.getTextAddrs(in_rom.seekableStream(), 0x10) catch |err| {
-            fatal("failed to read text dest address from rom file {s}, error: {s}\n", .{ args.input_rom_path, @errorName(err) });
+        const dest_start, const dest_len = address_table.getTextAddressAndLenById(args.dest_level_id) catch {
+            panic("invalid destination level id {d}\n", .{ args.dest_level_id });
         };
-        const max_text_size = dest_end - dest_start;
-
-        if (compressed_text.len > max_text_size) {
-            fatal("resulting text data larger than original data: {d} bytes (original {d})\n", .{ compressed_text.len, max_text_size });
+        
+        if (compressed_text.len > dest_len) {
+            return error.TextDataTooBig;
+            // fatal("resulting text data larger than original data: {d} bytes (original {d})\n", .{ compressed_text.len, dest_len });
         }
 
-        std.mem.copyForwards(u8, out_rom_bytes[dest_start..dest_end], compressed_text);
+        std.mem.copyForwards(u8, out_rom_bytes[dest_start..][0..dest_len], compressed_text);
     }
 
     {
-        // TODO: this patching of the checksum could be a separate command
-        var fbs = std.io.fixedBufferStream(out_rom_bytes);
-        fixRomChecksum(fbs.seekableStream()) catch |err| {
-            fatal("failed to patch checksum for output rom bytes, error: {s}\n", .{@errorName(err)});
-        };
+        fixRomChecksum(out_rom_bytes);
     }
 
-    var out_rom = std.fs.cwd().createFile(args.output_rom_path, .{}) catch |err| {
-        fatal("failed to create output rom file \"{s}\", error: {s}\n", .{ args.output_rom_path, @errorName(err) });
-    };
+    var out_rom = std.fs.cwd().createFile(args.output_rom_path, .{}) catch return error.FailedToCreateRom;
     defer out_rom.close();
 
-    out_rom.writeAll(out_rom_bytes) catch |err| {
-        fatal("failed to write to output rom file \"{s}\", error: {s}\n", .{ args.output_rom_path, @errorName(err) });
-    };
+    out_rom.writeAll(out_rom_bytes) catch return error.FailedToCreateRom;
 }
 
-fn fixMariposaCommand(args: FixMariposaCommandArgs) void {
-    var rom = std.fs.cwd().openFile(args.rom_path, .{ .mode = .write_only }) catch fatal("failed to open input rom \"{s}\"\n", .{args.rom_path});
+const FixMariposaError = error {
+    FailedToOpenRom,
+    FailedToWriteToRom,
+};
+
+fn fixMariposaCommand(args: FixMariposaCommandArgs) FixMariposaError!void {
+    var rom = std.fs.cwd().openFile(args.rom_path, .{ .mode = .write_only }) catch return error.FailedToOpenRom;
     defer rom.close();
-    const rom_stream = rom.seekableStream();
-    rom_stream.seekTo(0x4fadb) catch |err| {
-        fatal("failed seeking rom file to mariposa fix destination, error: {s}\n", .{@errorName(err)});
-    };
-    rom_stream.context.writer().writeInt(u16, 0x1010, .big) catch |err| {
-        fatal("failed writing mariposa text fix to rom, error: {s}\n", .{@errorName(err)});
-    };
+
+    var write_buf: [2]u8 = undefined;
+    var w = rom.writer(&write_buf);
+    w.seekTo(0x4fadb) catch return error.FailedToWriteToRom;
+    w.interface.writeInt(u16, 0x1010, .big) catch return error.FailedToWriteToRom;
+    w.interface.flush() catch return error.FailedToWriteToRom;
 }
 
 const FixMariposaCommandArgs = struct {
@@ -452,27 +452,101 @@ fn parseFixMariposaCommandArgs(args: []const []const u8) !FixMariposaCommandArgs
     };
 }
 
-fn fixRomChecksum(seekable_stream: anytype) !void {
-    seekable_stream.seekTo(0x300) catch return error.SeekFailed;
-
+fn fixRomChecksum(rom_bytes: []u8) void {
+    // first overwrite game-specific checksum code with some no-ops
     const m68k_nop_code: u16 = 0x4e71;
-
-    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
-    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
-    seekable_stream.context.writer().writeInt(u16, m68k_nop_code, .big) catch return error.WriteFailed;
+    std.mem.writeInt(u16, rom_bytes[0x300..][0..2], m68k_nop_code, .big);
+    std.mem.writeInt(u16, rom_bytes[0x302..][0..2], m68k_nop_code, .big);
+    std.mem.writeInt(u16, rom_bytes[0x304..][0..2], m68k_nop_code, .big);
 
     // calculate standard sega header checksum and patch the rom with that
-    const sega_checksum = calculateSegaHeaderChecksum(seekable_stream) catch |err| {
+    const sega_checksum = calculateSegaHeaderChecksum(rom_bytes) catch |err| {
         fatal("failed to calculate rom checksum, error: {s}\n", .{@errorName(err)});
     };
-    seekable_stream.seekTo(0x18e) catch return error.SeekFailed;
-    seekable_stream.context.writer().writeInt(u16, sega_checksum, .big) catch return error.WriteFailed;
+    std.mem.writeInt(u16, rom_bytes[0x18e..][0..2], sega_checksum, .big);
 }
 
-fn fatal(comptime format: []const u8, args: anytype) noreturn {
-    std.log.err(format, args);
-    std.process.exit(1);
+const num_levels = 27;
+const level_ids = [num_levels]u8{ 0x00, 0x01, 0x03, 0x10, 0x11, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x34, 0x40, 0x41, 0x42, 0x43, 0x50, 0x51, 0x52, 0x53, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63 };
+
+const RomEclAddressTable = struct {
+    
+    const script_section_end_addr = 0x42b0a;
+    const text_section_end_addr = 0x51102;
+    
+    script_addrs: [num_levels]u32,
+    text_addrs: [num_levels]u32,
+
+    pub fn getScriptAddressAndLenById(table: *const RomEclAddressTable, level_id: u8) Error!struct {u32, u32} {
+        const level_index = std.mem.indexOfScalar(u8, &level_ids, level_id) orelse return error.InvalidLevelId;
+
+        const is_last_level = level_index == num_levels - 1;
+        
+        const start_addr = table.script_addrs[level_index];
+        const end_addr = if (is_last_level) script_section_end_addr else table.script_addrs[level_index + 1];
+        
+        return .{start_addr, end_addr - start_addr};
+    }
+
+    pub fn getTextAddressAndLenById(table: *const RomEclAddressTable, level_id: u8) Error!struct {u32, u32} {
+        const level_index = std.mem.indexOfScalar(u8, &level_ids, level_id) orelse return error.InvalidLevelId;
+
+        const is_last_level = level_index == num_levels - 1;
+        
+        const start_addr = table.text_addrs[level_index];
+        const end_addr = if (is_last_level) text_section_end_addr else table.text_addrs[level_index + 1];
+        
+        return .{start_addr, end_addr - start_addr};
+    }
+
+    const Error = error{
+        InvalidLevelId,
+    };
+};
+
+fn readRomEclAddressTable(rom_file: *std.fs.File) error{FailedToReadRom}!RomEclAddressTable {
+    const script_offset_table_addr = 0x38d02;
+    const text_offset_table_addr = 0x42b2a;
+    const old_pos = rom_file.getPos() catch return error.FailedToReadRom;
+
+    var result = RomEclAddressTable { .script_addrs = undefined, .text_addrs = undefined, };
+
+    var read_buf: [512]u8 = undefined;
+    var r = rom_file.reader(&read_buf);
+
+    r.seekTo(script_offset_table_addr) catch return error.FailedToReadRom;
+    for (&result.script_addrs) |*address| {
+        const offset = r.interface.takeInt(u32, .big) catch return error.FailedToReadRom;
+        address.* = script_offset_table_addr + offset;
+    }
+    
+    r.seekTo(text_offset_table_addr) catch return error.FailedToReadRom;
+    for (&result.text_addrs) |*address| {
+        const offset = r.interface.takeInt(u32, .big) catch return error.FailedToReadRom;
+        address.* = text_offset_table_addr + offset;
+    }
+
+    rom_file.seekTo(old_pos) catch return error.FailedToReadRom;
+
+    return result;
 }
+
+const help_text =
+    \\Usage: buck-ecl-tool [command] [options]
+    \\
+    \\Commands:
+    \\
+    \\  extract-all --rom [input rom path] --out [output directory]
+    \\    Extract all levels in rom as text ECL format to output directory
+    \\
+    \\  patch-rom --rom [input rom path] --ecl [updated ecl path] --dest-level-id [rom level id to overwrite] --out [output rom path]
+    \\    Patch specified level id in rom with the given text ECL file, writing the updated rom file to [out]
+    \\
+    \\  fix-mariposa --rom [input rom path]
+    \\    Apply fix to original compressed mariposa text data in rom that causes lzw decoder to erroneously keep running on
+    \\    level id 97 (0x61)
+    \\
+;
 
 test "fuzz there and back" {
     // return std.testing.fuzz({}, testEncodeDecode, .{});
@@ -493,7 +567,7 @@ fn testEncodeDecode(context: std.mem.Allocator, input: []const u8) anyerror!void
     var decoder = try lzw.Decoder.init(allocator);
     defer decoder.deinit(allocator);
 
-    var compressed = std.ArrayList(u8).init(allocator);
+    var compressed = std.array_list.Managed(u8).init(allocator);
     defer compressed.deinit();
     {
         var fbs = std.io.fixedBufferStream(input);
@@ -501,7 +575,7 @@ fn testEncodeDecode(context: std.mem.Allocator, input: []const u8) anyerror!void
         // try compressed.appendSlice("\x00\x00\x00\x00");
     }
     
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
     {
         var fbs = std.io.fixedBufferStream(compressed.items);

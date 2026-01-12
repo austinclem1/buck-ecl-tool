@@ -16,8 +16,8 @@ const IndexSlice = @import("../IndexSlice.zig");
 allocator: Allocator,
 state: State,
 command_blocks: std.StringArrayHashMap(IndexSlice),
-commands: std.ArrayList(Ast.Command),
-args: std.ArrayList(Arg),
+commands: std.array_list.Managed(Ast.Command),
+args: std.array_list.Managed(Arg),
 vars: std.StringArrayHashMap(VarInfo),
 data_blocks: std.StringArrayHashMap([]const u8),
 
@@ -26,8 +26,8 @@ pub fn init(allocator: Allocator) TextParser {
         .allocator = allocator,
         .state = .start,
         .command_blocks = std.StringArrayHashMap(IndexSlice).init(allocator),
-        .commands = std.ArrayList(Ast.Command).init(allocator),
-        .args = std.ArrayList(Arg).init(allocator),
+        .commands = std.array_list.Managed(Ast.Command).init(allocator),
+        .args = std.array_list.Managed(Arg).init(allocator),
         .vars = std.StringArrayHashMap(VarInfo).init(allocator),
         .data_blocks = std.StringArrayHashMap([]const u8).init(allocator),
     };
